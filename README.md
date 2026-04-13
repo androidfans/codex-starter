@@ -24,6 +24,76 @@
 
 ---
 
+# English
+
+## The Problem
+
+`codex resume` is fine for continuing the last session. It is much worse for browsing old work.
+
+Once you have dozens of sessions, you usually remember:
+
+- which repo you were in
+- what the first prompt was about
+- whether it was a resumable interactive CLI session
+
+You do not remember the UUID.
+
+## The Solution
+
+```bash
+codex-starter
+```
+
+`codex-starter` turns your local `~/.codex/sessions/**/*.jsonl` history into a browseable terminal homepage with search, project filters, rename, delete, dangerous-mode resume, and one-key continue.
+
+By default it only shows interactive sessions that make sense to resume. One-shot `codex exec` runs are still parseable on disk, but they are excluded from the main list so the starter does not reopen stale automation contexts.
+
+## Features
+
+- Warm ember-themed split-pane TUI
+- Instant search with `/`
+- Dangerous mode with `d`
+- Explicit launch mode selector with `m`
+- Project filter with `p`
+- Resume selected session with `Enter`
+- Rename selected session with `r`
+- Delete selected session with `x`
+- Copy session id with `c`
+- Self-update with `--update`
+- Launches through your interactive shell so existing shell wrappers and env loaders still apply
+- Fully local, no network, no telemetry
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|:---:|--------|
+| `↑` `↓` | Navigate sessions |
+| `Enter` | Start new / resume selected session |
+| `n` | New session |
+| `m` | Cycle launch mode |
+| `/` | Search |
+| `d` | Resume or start in dangerous mode |
+| `p` | Filter by project |
+| `s` | Cycle sort mode |
+| `c` | Copy session ID |
+| `r` | Rename selected session |
+| `x` / `Delete` | Delete selected session |
+| `Home` / `End` | Jump to first / last |
+| `Ctrl-D` / `Ctrl-U` | Page down / up |
+| `Esc` | Clear filter |
+| `q` / `Ctrl-C` | Quit |
+
+## Requirements
+
+- Node.js >= 18
+- Codex CLI (`codex`) available in `PATH`
+
+## License
+
+MIT
+
+---
+
 # 中文
 
 ## 痛点
@@ -122,73 +192,3 @@ codex-starter
 主列表会过滤掉 `source=exec` 或 `originator=codex_exec` 的非交互执行会话，只保留适合从 TUI 中继续的会话。
 
 会话重命名元数据持久化保存在 `~/.codex/codex-starter-meta.json`。
-
----
-
-# English
-
-## The Problem
-
-`codex resume` is fine for continuing the last session. It is much worse for browsing old work.
-
-Once you have dozens of sessions, you usually remember:
-
-- which repo you were in
-- what the first prompt was about
-- whether it was a resumable interactive CLI session
-
-You do not remember the UUID.
-
-## The Solution
-
-```bash
-codex-starter
-```
-
-`codex-starter` turns your local `~/.codex/sessions/**/*.jsonl` history into a browseable terminal homepage with search, project filters, rename, delete, dangerous-mode resume, and one-key continue.
-
-By default it only shows interactive sessions that make sense to resume. One-shot `codex exec` runs are still parseable on disk, but they are excluded from the main list so the starter does not reopen stale automation contexts.
-
-## Features
-
-- Warm ember-themed split-pane TUI
-- Instant search with `/`
-- Dangerous mode with `d`
-- Explicit launch mode selector with `m`
-- Project filter with `p`
-- Resume selected session with `Enter`
-- Rename selected session with `r`
-- Delete selected session with `x`
-- Copy session id with `c`
-- Self-update with `--update`
-- Launches through your interactive shell so existing shell wrappers and env loaders still apply
-- Fully local, no network, no telemetry
-
-## Keyboard Shortcuts
-
-| Key | Action |
-|:---:|--------|
-| `↑` `↓` | Navigate sessions |
-| `Enter` | Start new / resume selected session |
-| `n` | New session |
-| `m` | Cycle launch mode |
-| `/` | Search |
-| `d` | Resume or start in dangerous mode |
-| `p` | Filter by project |
-| `s` | Cycle sort mode |
-| `c` | Copy session ID |
-| `r` | Rename selected session |
-| `x` / `Delete` | Delete selected session |
-| `Home` / `End` | Jump to first / last |
-| `Ctrl-D` / `Ctrl-U` | Page down / up |
-| `Esc` | Clear filter |
-| `q` / `Ctrl-C` | Quit |
-
-## Requirements
-
-- Node.js >= 18
-- Codex CLI (`codex`) available in `PATH`
-
-## License
-
-MIT
