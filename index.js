@@ -47,10 +47,10 @@ function buildCodexCommand({ sessionId, modeId }) {
   return parts.join(' ');
 }
 
-// ─── Color Palette (Tokyo Night) ─────────────────────────────────────────────
+// ─── Color Palette (Ember Terminal) ──────────────────────────────────────────
 const PROJECT_COLORS = [
-  '#7aa2f7', '#bb9af7', '#7dcfff', '#9ece6a',
-  '#e0af68', '#f7768e', '#73daca', '#ff9e64',
+  '#ff7a1a', '#ffd166', '#5ad1e6', '#a3e635',
+  '#ffb347', '#ff5d73', '#5bd1b9', '#ff8f3f',
 ];
 
 // ─── Paths ───────────────────────────────────────────────────────────────────
@@ -542,31 +542,31 @@ function createApp() {
   });
 
   // Force screen-level fill color so no terminal bg leaks through
-  screen.style = { bg: 234 };  // 234 = xterm color closest to #1a1b26
+  screen.style = { bg: 233 };  // 233 = xterm color closest to #141414
 
   // ─── Header ────────────────────────────────────────────────────────────
   const header = blessed.box({
     parent: screen, top: 0, left: 0, width: '100%', height: 3,
-    tags: true, style: { fg: 'white', bg: '#1a1b26' },
+    tags: true, style: { fg: 'white', bg: '#141414' },
   });
 
   function updateHeader() {
-    const title = `{bold}{#7aa2f7-fg}${APP_NAME}{/}`;
-    const count = `{#9ece6a-fg}${filteredSessions.length}{/}{#565f89-fg}/${allSessions.length} sessions{/}`;
-    const proj = `{#bb9af7-fg}${uniqueProjects.length}{/}{#565f89-fg} projects{/}`;
-    const sort = `{#73daca-fg}[${sortMode}]{/}`;
-    const launchMode = `{#f7768e-fg}[${getLaunchMode(launchModeId).label}]{/}`;
+    const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`;
+    const count = `{#a3e635-fg}${filteredSessions.length}{/}{#8a8178-fg}/${allSessions.length} sessions{/}`;
+    const proj = `{#ffd166-fg}${uniqueProjects.length}{/}{#8a8178-fg} projects{/}`;
+    const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
+    const launchMode = `{#ff5d73-fg}[${getLaunchMode(launchModeId).label}]{/}`;
     const search = isSearchMode
-      ? `{#e0af68-fg}/ ${filterText}▌{/}`
-      : (filterText ? `{#e0af68-fg}/ ${filterText}{/}` : '');
+      ? `{#ffb347-fg}/ ${filterText}▌{/}`
+      : (filterText ? `{#ffb347-fg}/ ${filterText}{/}` : '');
     let parts = [title, count, proj];
     parts.push(sort);
     parts.push(launchMode);
     if (search) parts.push(search);
-    header.setContent(`\n ${parts.join(' {#414868-fg}│{/} ')}`);
+    header.setContent(`\n ${parts.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
-  blessed.line({ parent: screen, top: 3, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#414868', bg: '#1a1b26' } });
+  blessed.line({ parent: screen, top: 3, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Left Panel: blessed.list for correct scroll tracking ──────────────
   const listPanel = blessed.list({
@@ -575,11 +575,11 @@ function createApp() {
     tags: true,
     scrollable: true,
     alwaysScroll: true,
-    scrollbar: { ch: '▐', style: { fg: '#565f89' } },
+    scrollbar: { ch: '▐', style: { fg: '#8a8178' } },
     style: {
-      bg: '#1a1b26',
-      fg: '#a9b1d6',
-      selected: { bg: '#3d59a1', fg: 'white', bold: true },
+      bg: '#141414',
+      fg: '#e7dccf',
+      selected: { bg: '#8a3b12', fg: 'white', bold: true },
     },
     keys: false,
     vi: false,
@@ -587,51 +587,51 @@ function createApp() {
     interactive: true,
   });
 
-  blessed.line({ parent: screen, top: 4, left: '50%', height: '100%-7', orientation: 'vertical', style: { fg: '#414868', bg: '#1a1b26' } });
+  blessed.line({ parent: screen, top: 4, left: '50%', height: '100%-7', orientation: 'vertical', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Right Panel ───────────────────────────────────────────────────────
   const detailPanel = blessed.box({
     parent: screen,
     top: 4, left: '50%+1', width: '50%-1', height: '100%-7',
     tags: true, scrollable: true, alwaysScroll: true,
-    scrollbar: { ch: '▐', style: { fg: '#565f89' } },
-    style: { bg: '#1a1b26' },
+    scrollbar: { ch: '▐', style: { fg: '#8a8178' } },
+    style: { bg: '#141414' },
     mouse: true,
   });
 
-  blessed.line({ parent: screen, bottom: 2, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#414868', bg: '#1a1b26' } });
+  blessed.line({ parent: screen, bottom: 2, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Footer ────────────────────────────────────────────────────────────
   const footer = blessed.box({
     parent: screen, bottom: 0, left: 0, width: '100%', height: 2,
-    tags: true, style: { fg: '#a9b1d6', bg: '#1a1b26' },
+    tags: true, style: { fg: '#e7dccf', bg: '#141414' },
   });
 
   function updateFooter() {
     if (isSearchMode) {
       const keys = [
-        '{#e0af68-fg}{bold}↵{/} {#e0af68-fg}Confirm{/}',
-        '{#7aa2f7-fg}{bold}↑↓{/} {#7aa2f7-fg}Navigate{/}',
-        '{#565f89-fg}{bold}⌫{/} {#565f89-fg}Delete char{/}',
-        '{#565f89-fg}{bold}Esc{/} {#565f89-fg}Clear{/}',
+        '{#ffb347-fg}{bold}↵{/} {#ffb347-fg}Confirm{/}',
+        '{#ff7a1a-fg}{bold}↑↓{/} {#ff7a1a-fg}Navigate{/}',
+        '{#8a8178-fg}{bold}⌫{/} {#8a8178-fg}Delete char{/}',
+        '{#8a8178-fg}{bold}Esc{/} {#8a8178-fg}Clear{/}',
       ];
-      footer.setContent(`\n ${keys.join(' {#414868-fg}│{/} ')}`);
+      footer.setContent(`\n ${keys.join(' {#3a3f46-fg}│{/} ')}`);
       return;
     }
     const keys = [
-        '{#9ece6a-fg}{bold}n{/} {#9ece6a-fg}New{/}',
-        '{#7aa2f7-fg}{bold}↵{/} {#7aa2f7-fg}Resume{/}',
-        '{#f7768e-fg}{bold}d{/} {#f7768e-fg}Danger{/}',
-        '{#f7768e-fg}{bold}m{/} {#f7768e-fg}Mode{/}',
-        '{#e0af68-fg}{bold}/{/} {#e0af68-fg}Search{/}',
-        '{#7dcfff-fg}{bold}p{/} {#7dcfff-fg}Project{/}',
-        '{#73daca-fg}{bold}s{/} {#73daca-fg}Sort{/}',
-      '{#565f89-fg}{bold}c{/} {#565f89-fg}Copy ID{/}',
-      '{#ff9e64-fg}{bold}r{/} {#ff9e64-fg}Rename{/}',
-      '{#f7768e-fg}{bold}x{/} {#f7768e-fg}Delete{/}',
-      '{#565f89-fg}{bold}q{/} {#565f89-fg}Quit{/}',
+        '{#a3e635-fg}{bold}n{/} {#a3e635-fg}New{/}',
+        '{#ff7a1a-fg}{bold}↵{/} {#ff7a1a-fg}Resume{/}',
+        '{#ff5d73-fg}{bold}d{/} {#ff5d73-fg}Danger{/}',
+        '{#ff5d73-fg}{bold}m{/} {#ff5d73-fg}Mode{/}',
+        '{#ffb347-fg}{bold}/{/} {#ffb347-fg}Search{/}',
+        '{#5ad1e6-fg}{bold}p{/} {#5ad1e6-fg}Project{/}',
+        '{#5bd1b9-fg}{bold}s{/} {#5bd1b9-fg}Sort{/}',
+      '{#8a8178-fg}{bold}c{/} {#8a8178-fg}Copy ID{/}',
+      '{#ff8f3f-fg}{bold}r{/} {#ff8f3f-fg}Rename{/}',
+      '{#ff5d73-fg}{bold}x{/} {#ff5d73-fg}Delete{/}',
+      '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}',
     ];
-    footer.setContent(`\n ${keys.join(' {#414868-fg}│{/} ')}`);
+    footer.setContent(`\n ${keys.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
   // ─── Build list items from sessions ────────────────────────────────────
@@ -641,25 +641,25 @@ function createApp() {
     return filteredSessions.map((session) => {
       const color = getProjectColor(session.project, projectColorMap);
       const proj = `{${color}-fg}${session.project.substring(0, 14).padEnd(14)}{/}`;
-      const time = `{#e0af68-fg}${formatTimestamp(session.lastTs).padEnd(18)}{/}`;
-      const msgs = `{#7aa2f7-fg}${String(session.estimatedMessages).padStart(4)}{/}{#565f89-fg}msg{/}`;
-      const size = `{#565f89-fg}${formatFileSize(session.fileSize).padStart(6)}{/}`;
+      const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(18)}{/}`;
+      const msgs = `{#ff7a1a-fg}${String(session.estimatedMessages).padStart(4)}{/}{#8a8178-fg}msg{/}`;
+      const size = `{#8a8178-fg}${formatFileSize(session.fileSize).padStart(6)}{/}`;
 
       const topicMaxLen = Math.max(20, listW - 2);
       let topic = session.topic;
-      if (topic.length > topicMaxLen) topic = topic.substring(0, topicMaxLen) + '…';
+      topic = truncateDisplayText(topic, topicMaxLen);
 
       const branch = session.gitBranch
-        ? `{#73daca-fg}${session.gitBranch.substring(0, 25)}{/}`
+        ? `{#5bd1b9-fg}${session.gitBranch.substring(0, 25)}{/}`
         : '';
-      const dur = session.duration ? `{#565f89-fg}${session.duration}{/}` : '';
+      const dur = session.duration ? `{#8a8178-fg}${session.duration}{/}` : '';
 
       // Compose a multi-line string for each list item.
       // blessed.list renders each item as a single row, so we pack info densely.
       // Line: project | time | msgs | size
       // (topic + branch shown on next visual line via padding trick)
       let line1 = ` ${proj} ${time} ${msgs} ${size}`;
-      let line2 = `   {#a9b1d6-fg}${esc(topic)}{/}`;
+      let line2 = `   {#e7dccf-fg}${esc(topic)}{/}`;
       let line3 = branch ? `   ${branch}  ${dur}` : (dur ? `   ${dur}` : '');
 
       // blessed.list items are single-line, but we can use \n inside them
@@ -673,7 +673,7 @@ function createApp() {
 
   // ─── Populate list ─────────────────────────────────────────────────────
   // Index 0 = "New Session", index 1+ = sessions
-  const NEW_SESSION_LABEL = ' {#9ece6a-fg}{bold}+ New Conversation{/}';
+  const NEW_SESSION_LABEL = ' {#a3e635-fg}{bold}+ New Conversation{/}';
 
   function refreshList() {
     const listW = Math.floor((screen.width || 100) / 2) - 2;
@@ -681,7 +681,7 @@ function createApp() {
     const sessionItems = filteredSessions.map((session) => {
       const color = getProjectColor(session.project, projectColorMap);
       const proj = `{${color}-fg}${session.project.substring(0, 12).padEnd(12)}{/}`;
-      const time = `{#e0af68-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
+      const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
 
       const fixedLen = 12 + 1 + 16 + 1 + 3;
       const topicMaxLen = Math.max(10, listW - fixedLen);
@@ -691,9 +691,9 @@ function createApp() {
 
       let label = `${proj} ${time} `;
       if (session.customTitle) {
-        label += `{#73daca-fg}{bold}${esc(topic)}{/}`;
+        label += `{#5bd1b9-fg}{bold}${esc(topic)}{/}`;
       } else {
-        label += `{#a9b1d6-fg}${esc(topic)}{/}`;
+        label += `{#e7dccf-fg}${esc(topic)}{/}`;
       }
 
       return label;
@@ -713,25 +713,25 @@ function createApp() {
       const launchMode = getLaunchMode(launchModeId);
       const launchCommand = buildCodexCommand({ modeId: launchModeId });
       let c = '';
-      c += `\n {#9ece6a-fg}{bold}Start a New Conversation{/}\n`;
-      c += ` {#414868-fg}${'─'.repeat(44)}{/}\n\n`;
-      c += ` {#a9b1d6-fg}Open a fresh Codex session and start{/}\n`;
-      c += ` {#a9b1d6-fg}working in the current directory.{/}\n\n`;
-      c += ` {#565f89-fg}Working Dir{/}  {#7dcfff-fg}${process.cwd()}{/}\n`;
-      c += ` {#565f89-fg}CLI{/}          {#73daca-fg}${cli}{/}\n`;
-      c += ` {#565f89-fg}Launch Mode{/}  {#f7768e-fg}${launchMode.label}{/}\n`;
-      c += ` {#565f89-fg}Command{/}      {#565f89-fg}${launchCommand}{/}\n\n`;
-      c += ` {#565f89-fg}${launchMode.description}{/}\n\n`;
-      c += ` {#414868-fg}${'─'.repeat(44)}{/}\n`;
-      c += ` {#9ece6a-fg}{bold}↵ Enter{/}{#9ece6a-fg} or {/}{#9ece6a-fg}{bold}n{/}{#9ece6a-fg} to launch{/}\n`;
-      c += ` {#f7768e-fg}{bold}m{/}{#f7768e-fg} to change startup mode{/}\n`;
+      c += `\n {#a3e635-fg}{bold}Start a New Conversation{/}\n`;
+      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n\n`;
+      c += ` {#e7dccf-fg}Open a fresh Codex session and start{/}\n`;
+      c += ` {#e7dccf-fg}working in the current directory.{/}\n\n`;
+      c += ` {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}\n`;
+      c += ` {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}\n`;
+      c += ` {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}\n`;
+      c += ` {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}\n\n`;
+      c += ` {#8a8178-fg}${launchMode.description}{/}\n\n`;
+      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n`;
+      c += ` {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}\n`;
+      c += ` {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}\n`;
       detailPanel.setContent(c);
       detailPanel.setScroll(0);
       return;
     }
 
     if (filteredSessions.length === 0 || !filteredSessions[selectedIndex]) {
-      detailPanel.setContent('\n  {#565f89-fg}No session selected{/}');
+      detailPanel.setContent('\n  {#8a8178-fg}No session selected{/}');
       return;
     }
 
@@ -746,66 +746,66 @@ function createApp() {
 
     const color = getProjectColor(session.project, projectColorMap);
     let c = '';
-    const sep = ` {#414868-fg}${'─'.repeat(44)}{/}`;
+    const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
 
     // Title
     c += `\n {${color}-fg}{bold}█ ${session.project}{/}\n`;
     if (session.customTitle) {
-      c += ` {#73daca-fg}{bold}${esc(session.customTitle)}{/}\n`;
+      c += ` {#5bd1b9-fg}{bold}${esc(session.customTitle)}{/}\n`;
     }
     c += sep + '\n\n';
 
     const fields = [
-      ['Session', `{#7dcfff-fg}${session.sessionId}{/}`],
-      ['Started', `{#e0af68-fg}${session.firstTs ? new Date(session.firstTs).toLocaleString() : '?'}{/}`],
-      ['Last active', `{#e0af68-fg}${session.lastTs ? new Date(session.lastTs).toLocaleString() : '?'}{/}`],
-      ['Duration', `{#9ece6a-fg}${session.duration || '<1m'}{/}`],
-      ['Messages', `{#7aa2f7-fg}${session.totalMessages || session.estimatedMessages}{/}`],
-      ['Size', `{#bb9af7-fg}${formatFileSize(session.fileSize)}{/}`],
+      ['Session', `{#5ad1e6-fg}${session.sessionId}{/}`],
+      ['Started', `{#ffb347-fg}${session.firstTs ? new Date(session.firstTs).toLocaleString() : '?'}{/}`],
+      ['Last active', `{#ffb347-fg}${session.lastTs ? new Date(session.lastTs).toLocaleString() : '?'}{/}`],
+      ['Duration', `{#a3e635-fg}${session.duration || '<1m'}{/}`],
+      ['Messages', `{#ff7a1a-fg}${session.totalMessages || session.estimatedMessages}{/}`],
+      ['Size', `{#ffd166-fg}${formatFileSize(session.fileSize)}{/}`],
     ];
-    if (session.gitBranch) fields.push(['Branch', `{#73daca-fg} ${session.gitBranch}{/}`]);
-    if (session.version) fields.push(['Codex', `{#565f89-fg}v${session.version}{/}`]);
-    if (session.cwd) fields.push(['Directory', `{#565f89-fg}${session.cwd}{/}`]);
-    if (session.modelProvider) fields.push(['Provider', `{#73daca-fg}${session.modelProvider}{/}`]);
-    if (session.source || session.originator) fields.push(['Mode', `{#565f89-fg}${session.source || session.originator}{/}`]);
-    fields.push(['Resume with', `{#f7768e-fg}${launchMode.label}{/}`]);
+    if (session.gitBranch) fields.push(['Branch', `{#5bd1b9-fg} ${session.gitBranch}{/}`]);
+    if (session.version) fields.push(['Codex', `{#8a8178-fg}v${session.version}{/}`]);
+    if (session.cwd) fields.push(['Directory', `{#8a8178-fg}${session.cwd}{/}`]);
+    if (session.modelProvider) fields.push(['Provider', `{#5bd1b9-fg}${session.modelProvider}{/}`]);
+    if (session.source || session.originator) fields.push(['Mode', `{#8a8178-fg}${session.source || session.originator}{/}`]);
+    fields.push(['Resume with', `{#ff5d73-fg}${launchMode.label}{/}`]);
 
     for (const [label, value] of fields) {
-      c += ` {#565f89-fg}${label.padEnd(12)}{/} ${value}\n`;
+      c += ` {#8a8178-fg}${label.padEnd(12)}{/} ${value}\n`;
     }
 
     if (session.toolsUsed && session.toolsUsed.length > 0) {
-      c += `\n {#7dcfff-fg}{bold}Tools Used{/}\n`;
-      const chips = session.toolsUsed.slice(0, 10).map(t => `{#414868-fg}[{/}{#7dcfff-fg}${t}{/}{#414868-fg}]{/}`).join(' ');
+      c += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
+      const chips = session.toolsUsed.slice(0, 10).map(t => `{#3a3f46-fg}[{/}{#5ad1e6-fg}${t}{/}{#3a3f46-fg}]{/}`).join(' ');
       c += ` ${chips}\n`;
-      if (session.toolsUsed.length > 10) c += ` {#565f89-fg}+${session.toolsUsed.length - 10} more{/}\n`;
+      if (session.toolsUsed.length > 10) c += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
     }
 
-    c += `\n {#bb9af7-fg}{bold}Conversation{/}\n`;
+    c += `\n {#ffd166-fg}{bold}Conversation{/}\n`;
     c += sep + '\n';
 
     const msgs = (session.userMessages || []).slice(0, 10);
     const assists = (session.assistantSnippets || []);
 
     if (msgs.length === 0) {
-      c += `\n  {#565f89-fg}(no readable messages){/}\n`;
+      c += `\n  {#8a8178-fg}(no readable messages){/}\n`;
     } else {
       msgs.forEach((msg, i) => {
         const clean = esc(msg.replace(/\n/g, ' ').trim());
         const trunc = clean.length > 80 ? clean.substring(0, 80) + '…' : clean;
-        c += `\n {#7aa2f7-fg}{bold}You >{/} ${trunc}\n`;
+        c += `\n {#ff7a1a-fg}{bold}You >{/} ${trunc}\n`;
         if (assists[i]) {
           const aClean = esc(assists[i].replace(/\n/g, ' ').trim());
           const aTrunc = aClean.length > 80 ? aClean.substring(0, 80) + '…' : aClean;
-          c += ` {#9ece6a-fg}Codex >{/} {#565f89-fg}${aTrunc}{/}\n`;
+          c += ` {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}\n`;
         }
       });
     }
 
     c += `\n${sep}`;
-    c += `\n {#9ece6a-fg}{bold}↵ Enter{/}{#9ece6a-fg} to resume this conversation{/}`;
-    c += `\n {#565f89-fg}${resumeCommand}{/}\n`;
-    c += ` {#565f89-fg}${launchMode.description}{/}\n`;
+    c += `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`;
+    c += `\n {#8a8178-fg}${resumeCommand}{/}\n`;
+    c += ` {#8a8178-fg}${launchMode.description}{/}\n`;
 
     detailPanel.setContent(c);
     detailPanel.setScroll(0);
@@ -874,12 +874,12 @@ function createApp() {
       parent: screen, top: 'center', left: 'center',
       width: Math.min(50, Math.max(...projects.map(p => p.length)) + 8),
       height: Math.min(projects.length + 4, 20),
-      label: ' {bold}{#7aa2f7-fg}Filter by Project{/} ',
+      label: ' {bold}{#ff7a1a-fg}Filter by Project{/} ',
       tags: true, border: { type: 'line' },
       style: {
-        border: { fg: '#7aa2f7' }, bg: '#24283b', fg: '#a9b1d6',
-        selected: { bg: '#3d59a1', fg: 'white', bold: true },
-        label: { fg: '#7aa2f7' },
+        border: { fg: '#ff7a1a' }, bg: '#1d1f24', fg: '#e7dccf',
+        selected: { bg: '#8a3b12', fg: 'white', bold: true },
+        label: { fg: '#ff7a1a' },
       },
       items: projects, keys: true, vi: true, mouse: true,
     });
@@ -1140,11 +1140,11 @@ function createApp() {
     const sid = filteredSessions[selectedIndex].sessionId;
     try {
       if (!copyToClipboard(sid)) throw new Error('clipboard unavailable');
-      footer.setContent(`\n  {#9ece6a-fg}{bold}✓ Copied:{/} {#7dcfff-fg}${sid}{/}`);
+      footer.setContent(`\n  {#a3e635-fg}{bold}✓ Copied:{/} {#5ad1e6-fg}${sid}{/}`);
       screen.render();
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);
     } catch (e) {
-      footer.setContent(`\n  {#f7768e-fg}{bold}Clipboard unavailable{/} {#565f89-fg}${sid}{/}`);
+      footer.setContent(`\n  {#ff5d73-fg}{bold}Clipboard unavailable{/} {#8a8178-fg}${sid}{/}`);
       screen.render();
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);
     }
@@ -1187,16 +1187,16 @@ function createApp() {
     const confirmPopup = blessed.box({
       parent: screen, top: 'center', left: 'center',
       width: 50, height: 9,
-      label: ' {bold}{#f7768e-fg}Delete Session?{/} ',
+      label: ' {bold}{#ff5d73-fg}Delete Session?{/} ',
       tags: true, border: { type: 'line' },
       style: {
-        border: { fg: '#f7768e' }, bg: '#24283b', fg: '#a9b1d6',
-        label: { fg: '#f7768e' },
+        border: { fg: '#ff5d73' }, bg: '#1d1f24', fg: '#e7dccf',
+        label: { fg: '#ff5d73' },
       },
       content:
-        `\n  {#a9b1d6-fg}${esc(topic)}{/}\n`
-        + `  {#565f89-fg}${session.sessionId}{/}\n\n`
-        + `  {#f7768e-fg}{bold}y{/}{#a9b1d6-fg} Delete  {/}{#565f89-fg}n / Esc{/}{#a9b1d6-fg} Cancel{/}`,
+        `\n  {#e7dccf-fg}${esc(topic)}{/}\n`
+        + `  {#8a8178-fg}${session.sessionId}{/}\n\n`
+        + `  {#ff5d73-fg}{bold}y{/}{#e7dccf-fg} Delete  {/}{#8a8178-fg}n / Esc{/}{#e7dccf-fg} Cancel{/}`,
     });
     popupOpen = true;
     confirmPopup.focus();
@@ -1206,7 +1206,7 @@ function createApp() {
       confirmPopup.destroy();
       popupOpen = false;
       deleteSession(session);
-      footer.setContent(`\n  {#f7768e-fg}{bold}✗ Deleted:{/} {#565f89-fg}${session.sessionId}{/}`);
+      footer.setContent(`\n  {#ff5d73-fg}{bold}✗ Deleted:{/} {#8a8178-fg}${session.sessionId}{/}`);
       renderAll();
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);
     });
@@ -1249,11 +1249,11 @@ function createApp() {
     renamePopup = blessed.box({
       parent: screen, top: 'center', left: 'center',
       width: 52, height: 7,
-      label: ' {bold}{#73daca-fg}Rename Session{/} ',
+      label: ' {bold}{#5bd1b9-fg}Rename Session{/} ',
       tags: true, border: { type: 'line' },
       style: {
-        border: { fg: '#73daca' }, bg: '#24283b', fg: '#a9b1d6',
-        label: { fg: '#73daca' },
+        border: { fg: '#5bd1b9' }, bg: '#1d1f24', fg: '#e7dccf',
+        label: { fg: '#5bd1b9' },
       },
     });
 
@@ -1261,15 +1261,15 @@ function createApp() {
       parent: renamePopup,
       top: 1, left: 1, right: 1, height: 1,
       tags: false,
-      style: { fg: 'white', bg: '#1a1b26' },
+      style: { fg: 'white', bg: '#141414' },
     });
 
     blessed.box({
       parent: renamePopup,
       top: 3, left: 1, right: 1, height: 1,
       tags: true,
-      style: { bg: '#24283b' },
-      content: '  {#9ece6a-fg}{bold}Enter{/}{#a9b1d6-fg} Save  {/}{#565f89-fg}Esc{/}{#a9b1d6-fg} Cancel{/}',
+      style: { bg: '#1d1f24' },
+      content: '  {#a3e635-fg}{bold}Enter{/}{#e7dccf-fg} Save  {/}{#8a8178-fg}Esc{/}{#e7dccf-fg} Cancel{/}',
     });
 
     popupOpen = true;
@@ -1314,18 +1314,18 @@ function createApp() {
     setTimeout(() => { renameJustFinished = false; }, 200);
 
     setTimeout(() => {
-      const titleLabel = newTitle ? `{#73daca-fg}${esc(newTitle)}{/}` : '{#565f89-fg}(title cleared){/}';
+      const titleLabel = newTitle ? `{#5bd1b9-fg}${esc(newTitle)}{/}` : '{#8a8178-fg}(title cleared){/}';
       renameConfirmSession = session;
       renameConfirmPopup = blessed.box({
         parent: screen, top: 'center', left: 'center',
         width: 48, height: 8,
-        label: ' {bold}{#9ece6a-fg}Renamed{/} ',
+        label: ' {bold}{#a3e635-fg}Renamed{/} ',
         tags: true, border: { type: 'line' },
         style: {
-          border: { fg: '#9ece6a' }, bg: '#24283b', fg: '#a9b1d6',
-          label: { fg: '#9ece6a' },
+          border: { fg: '#a3e635' }, bg: '#1d1f24', fg: '#e7dccf',
+          label: { fg: '#a3e635' },
         },
-        content: `\n  ${titleLabel}\n\n  {#9ece6a-fg}{bold}Enter{/}{#a9b1d6-fg} Resume  {/}{#565f89-fg}Esc{/}{#a9b1d6-fg} Back to list{/}`,
+        content: `\n  ${titleLabel}\n\n  {#a3e635-fg}{bold}Enter{/}{#e7dccf-fg} Resume  {/}{#8a8178-fg}Esc{/}{#e7dccf-fg} Back to list{/}`,
       });
       popupOpen = true;
       renameConfirmPopup.focus();

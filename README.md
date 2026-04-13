@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/%F0%9F%9A%80-Codex_Starter-7aa2f7?style=for-the-badge&labelColor=1a1b26" alt="Codex Starter" />
+  <img src="https://img.shields.io/badge/%F0%9F%9A%80-Codex_Starter-ff7a1a?style=for-the-badge&labelColor=141414" alt="Codex Starter" />
   <br/>
-  <img src="https://img.shields.io/npm/v/codex-starter?style=flat-square&color=f7768e&logo=npm" alt="npm" />
-  <img src="https://img.shields.io/badge/node-%3E%3D18-9ece6a?style=flat-square&logo=node.js&logoColor=white" alt="Node.js" />
-  <img src="https://img.shields.io/badge/license-MIT-bb9af7?style=flat-square" alt="MIT License" />
-  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-e0af68?style=flat-square" alt="Platform" />
+  <img src="https://img.shields.io/npm/v/codex-starter?style=flat-square&color=ff5d73&logo=npm" alt="npm" />
+  <img src="https://img.shields.io/badge/node-%3E%3D18-a3e635?style=flat-square&logo=node.js&logoColor=111111" alt="Node.js" />
+  <img src="https://img.shields.io/badge/license-MIT-5ad1e6?style=flat-square" alt="MIT License" />
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-ffd166?style=flat-square&logoColor=111111" alt="Platform" />
 </p>
 
 <h1 align="center">🚀 Codex Starter</h1>
@@ -54,7 +54,7 @@ codex-starter
 
 | | 功能 | 说明 |
 |---|---|---|
-| 🎨 | **精美 TUI** | Tokyo Night 风格，分屏浏览 |
+| 🎨 | **精美 TUI** | Ember Terminal 风格，暖色工业感分屏浏览 |
 | ✨ | **一键新建** | 顶部直接开新会话 |
 | 🔍 | **即时搜索** | `/` 开始输入，实时过滤 |
 | 📂 | **项目过滤** | `p` 按工作目录筛选 |
@@ -151,7 +151,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 ## Features
 
-- Beautiful split-pane TUI
+- Warm ember-themed split-pane TUI
 - Instant search with `/`
 - Dangerous mode with `d`
 - Explicit launch mode selector with `m`
