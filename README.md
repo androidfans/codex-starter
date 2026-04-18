@@ -15,6 +15,10 @@
 </p>
 
 <p align="center">
+  Built for <strong>AI-native developer workflows</strong>: local-first, resumable, searchable, and fast.
+</p>
+
+<p align="center">
   <code>npm install -g codex-starter</code>&nbsp;&nbsp;→&nbsp;&nbsp;<code>codex-starter</code>
 </p>
 
@@ -29,6 +33,8 @@
 ## The Problem
 
 `codex resume` is fine for continuing the last session. It is much worse for browsing old work.
+
+If you are actually coding with agents every day, session history becomes part of your development environment. You need to recover context fast, search by intent instead of UUID, and jump back into the right repo without friction.
 
 Once you have dozens of sessions, you usually remember:
 
@@ -45,6 +51,8 @@ codex-starter
 ```
 
 `codex-starter` turns your local `~/.codex/sessions/**/*.jsonl` history into a browseable terminal homepage with search, project filters, rename, delete, dangerous-mode resume, and one-key continue.
+
+It is designed for people treating coding agents as part of a real workflow, not just a toy CLI: keep everything local, reduce resume friction, and make old agent work actually reusable.
 
 By default it only shows interactive sessions that make sense to resume. One-shot `codex exec` runs are still parseable on disk, but they are excluded from the main list so the starter does not reopen stale automation contexts.
 
@@ -87,6 +95,11 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 - Node.js >= 18
 - Codex CLI (`codex`) available in `PATH`
+
+## Related Projects
+
+- **[claude-starter](https://github.com/Bojun-Vvibe/claude-starter)** — the Claude Code counterpart with the same local-first philosophy
+- **[Bojun-Vvibe](https://github.com/Bojun-Vvibe)** — more terminal UX and AI-native workflow experiments
 
 ## License
 
