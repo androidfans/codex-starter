@@ -75,6 +75,7 @@ function createMockWidget(label, opts = {}) {
   const widget = new EventEmitter();
   widget.__label = label;
   widget.__id = widgetId++;
+  widget.options = opts;
   widget._content = '';
   widget._items = opts.items ? [...opts.items] : [];
   widget.items = opts.items ? [...opts.items] : [];
@@ -189,6 +190,15 @@ describe('codex starter tui', () => {
     assert.match(widgets.header.getContent(), /Codex Starter/);
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
+  });
+
+  it('uses top and bottom constraints for full-height history panes', () => {
+    assert.equal(widgets.list.options.top, 4);
+    assert.equal(widgets.list.options.bottom, 3);
+    assert.equal(widgets.list.options.height, undefined);
+    assert.equal(widgets.detail.options.top, 4);
+    assert.equal(widgets.detail.options.bottom, 3);
+    assert.equal(widgets.detail.options.height, undefined);
   });
 
   it('supports search via slash mode', () => {

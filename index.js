@@ -582,7 +582,7 @@ function createApp() {
   // ─── Left Panel: blessed.list for correct scroll tracking ──────────────
   const listPanel = blessed.list({
     parent: screen,
-    top: 4, left: 0, width: '50%', height: '100%-7',
+    top: 4, bottom: 3, left: 0, width: '50%',
     tags: true,
     scrollable: true,
     alwaysScroll: true,
@@ -598,12 +598,12 @@ function createApp() {
     interactive: true,
   });
 
-  blessed.line({ parent: screen, top: 4, left: '50%', height: '100%-7', orientation: 'vertical', style: { fg: '#3a3f46', bg: '#141414' } });
+  blessed.line({ parent: screen, top: 4, bottom: 3, left: '50%', orientation: 'vertical', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Right Panel ───────────────────────────────────────────────────────
   const detailPanel = blessed.box({
     parent: screen,
-    top: 4, left: '50%+1', width: '50%-1', height: '100%-7',
+    top: 4, bottom: 3, left: '50%+1', width: '50%-1',
     tags: true, scrollable: true, alwaysScroll: true,
     scrollbar: { ch: '▐', style: { fg: '#8a8178' } },
     style: { bg: '#141414' },
