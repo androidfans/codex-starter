@@ -43,6 +43,11 @@ writeSession('rollout-a.jsonl', [
     type: 'event_msg',
     payload: { type: 'agent_message', message: 'On it.' },
   },
+  ...Array.from({ length: 20 }, (_, index) => ({
+    timestamp: `2026-04-13T02:48:${String(index).padStart(2, '0')}.000Z`,
+    type: 'event_msg',
+    payload: { type: 'user_message', message: `extra prompt ${String(index + 1).padStart(2, '0')}` },
+  })),
 ]);
 
 writeSession('rollout-b.jsonl', [
@@ -199,6 +204,14 @@ describe('codex starter tui', () => {
     assert.equal(widgets.detail.options.top, 4);
     assert.equal(widgets.detail.options.bottom, 3);
     assert.equal(widgets.detail.options.height, undefined);
+  });
+
+  it('expands the conversation preview for taller detail panes', () => {
+    triggerScreenKey('escape');
+    widgets.detail.height = 80;
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    assert.match(widgets.detail.getContent(), /extra prompt 11/);
   });
 
   it('supports search via slash mode', () => {
