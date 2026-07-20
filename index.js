@@ -33,7 +33,11 @@ const CLI = detectCLI();
 
 function getShellCommand(command) {
   const shellPath = process.env.SHELL || '/bin/sh';
-  return { shellPath, shellArgs: ['-ic', command] };
+  const shellName = path.basename(shellPath);
+  // A nested interactive zsh can stop on SIGTTOU while restoring terminal
+  // control after Codex exits. Disabling job control avoids that handoff.
+  const shellCommand = shellName === 'zsh' ? `unsetopt MONITOR; ${command}` : command;
+  return { shellPath, shellArgs: ['-ic', shellCommand] };
 }
 
 function getLaunchMode(modeId) {

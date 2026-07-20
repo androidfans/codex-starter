@@ -117,11 +117,21 @@ describe('helpers', () => {
     assert.deepEqual(detectCLI(), { name: 'codex', cmd: 'codex' });
   });
 
-  it('builds shell commands through the user shell', () => {
+  it('disables job control in the nested interactive zsh', () => {
     const originalShell = process.env.SHELL;
     process.env.SHELL = '/bin/zsh';
     assert.deepEqual(getShellCommand('codex resume abc'), {
       shellPath: '/bin/zsh',
+      shellArgs: ['-ic', 'unsetopt MONITOR; codex resume abc'],
+    });
+    process.env.SHELL = originalShell;
+  });
+
+  it('does not inject zsh syntax into other shells', () => {
+    const originalShell = process.env.SHELL;
+    process.env.SHELL = '/usr/local/bin/fish';
+    assert.deepEqual(getShellCommand('codex resume abc'), {
+      shellPath: '/usr/local/bin/fish',
       shellArgs: ['-ic', 'codex resume abc'],
     });
     process.env.SHELL = originalShell;
