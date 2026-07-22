@@ -16,6 +16,7 @@
 const blessed = require('blessed');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
 const { spawn, execSync, spawnSync } = require('child_process');
 const os = require('os');
 
@@ -434,43 +435,78 @@ function loadSessionDetail(session) {
   return session;
 }
 
-function buildSessionSearchText(session) {
-  const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
+function isSearchRelevantLine(line) {
+  // Codex writes the entry and payload types near the beginning of each JSONL
+  // record. Inspecting only that prefix avoids parsing huge tool outputs that
+  // can contain arbitrary JSON-like text of their own.
+  const head = line.substring(0, 4096);
+  if (/"type"\s*:\s*"event_msg"/.test(head)) {
+    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"(?:user_message|agent_message)"/.test(head);
+  }
+  if (/"type"\s*:\s*"response_item"/.test(head)) {
+    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"message"/.test(head);
+  }
+  return false;
+}
+
+function collectSessionSearchEntry(entry, userInputs, finalAnswers) {
+  if (entry.type === 'event_msg') {
+    const payload = entry.payload || {};
+    if (payload.type === 'user_message' && typeof payload.message === 'string') {
+      const text = payload.message.trim();
+      if (text && !isBoilerplateText(text)) userInputs.add(text);
+    }
+    if (payload.type === 'agent_message'
+        && (payload.phase === 'final_answer' || payload.phase == null)
+        && typeof payload.message === 'string') {
+      const text = payload.message.trim();
+      // Before phases were added, agent_message represented the completed
+      // user-facing answer. Keep it as the legacy final-answer fallback.
+      if (text) finalAnswers.add(text);
+    }
+    return;
+  }
+
+  if (entry.type !== 'response_item') return;
+  const payload = entry.payload || {};
+  if (payload.type !== 'message') return;
+
+  if (payload.role === 'user') {
+    const text = extractUserText(entry);
+    if (text) userInputs.add(text);
+  }
+
+  if (payload.role === 'assistant'
+      && (payload.phase === 'final_answer' || payload.phase == null)) {
+    for (const text of extractTextParts(payload.content)) {
+      const trimmed = text.trim();
+      if (trimmed) finalAnswers.add(trimmed);
+    }
+  }
+}
+
+async function buildSessionSearchText(session, options = {}) {
   const userInputs = new Set();
   const finalAnswers = new Set();
+  const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
+  // readline buffers one complete JSONL record. That trade-off is intentional:
+  // local transcript records are expected to fit in memory, including the user
+  // and final-answer records that search must retain without truncation.
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
 
   // event_msg/user_message is the canonical record for user input. Keep the
   // response_item fallback for older or interrupted transcripts that do not
   // have a matching event_msg entry. The Set removes duplicated records.
-  for (const line of lines) {
+  for await (const line of lines) {
+    if (options.isCancelled && options.isCancelled()) {
+      lines.close();
+      input.destroy();
+      return null;
+    }
+    if (!isSearchRelevantLine(line)) continue;
     try {
       const entry = JSON.parse(line);
-      if (entry.type === 'event_msg') {
-        const payload = entry.payload || {};
-        if (payload.type === 'user_message' && typeof payload.message === 'string') {
-          const text = payload.message.trim();
-          if (text && !isBoilerplateText(text)) userInputs.add(text);
-        }
-        continue;
-      }
-
-      if (entry.type !== 'response_item') continue;
-      const payload = entry.payload || {};
-      if (payload.type !== 'message') continue;
-
-      if (payload.role === 'user') {
-        const text = extractUserText(entry);
-        if (text) userInputs.add(text);
-      }
-
-      // Only index the answer Codex marks as final. Commentary, reasoning,
-      // tool calls/results, and patch records are intentionally excluded.
-      if (payload.role === 'assistant' && payload.phase === 'final_answer') {
-        for (const text of extractTextParts(payload.content)) {
-          const trimmed = text.trim();
-          if (trimmed) finalAnswers.add(trimmed);
-        }
-      }
+      collectSessionSearchEntry(entry, userInputs, finalAnswers);
     } catch (_) { /* ignore malformed lines */ }
   }
 
@@ -484,7 +520,7 @@ function indexSessionsInBackground(sessions, options = {}) {
   let nextIndex = 0;
   let cancelled = false;
 
-  function indexNextSession() {
+  async function indexNextSession() {
     if (cancelled) return;
     if (nextIndex >= sessions.length) {
       onComplete();
@@ -493,7 +529,11 @@ function indexSessionsInBackground(sessions, options = {}) {
 
     const session = sessions[nextIndex++];
     try {
-      session.searchText = buildSessionSearchText(session);
+      const searchText = await buildSessionSearchText(session, {
+        isCancelled: () => cancelled,
+      });
+      if (cancelled) return;
+      session.searchText = searchText || '';
       session._searchIndexError = null;
     } catch (error) {
       session.searchText = '';
@@ -525,6 +565,23 @@ function loadAllSessions() {
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
   return sessions;
+}
+
+function filterSessionList(sessions, filterText = '', projectFilter = '') {
+  const terms = filterText.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return sessions.filter(session => {
+    if (projectFilter && session.project !== projectFilter) return false;
+    if (terms.length === 0) return true;
+    const haystack = [
+      session.project,
+      session.topic,
+      session.customTitle || '',
+      session.gitBranch || '',
+      session.sessionId,
+      session.searchText || '',
+    ].join(' ').toLowerCase();
+    return terms.every(term => haystack.includes(term));
+  });
 }
 
 // ─── Formatting Helpers ──────────────────────────────────────────────────────
@@ -616,10 +673,13 @@ function createApp() {
   let filteredSessions = [...allSessions];
   let selectedIndex = -1;  // -1 = "New Session", 0+ = session index
   let filterText = '';
+  let projectFilter = '';
   let isSearchMode = false;
   let sortMode = 'time';
   let launchModeId = getDefaultLaunchMode(meta);
   let searchIndexing = allSessions.length > 0;
+  let pendingIndexRefresh = false;
+  let indexRefreshTimer = null;
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
@@ -654,9 +714,11 @@ function createApp() {
     const search = isSearchMode
       ? `{#ffb347-fg}/ ${filterText}▌{/}`
       : (filterText ? `{#ffb347-fg}/ ${filterText}{/}` : '');
+    const project = projectFilter ? `{#5ad1e6-fg}[${projectFilter}]{/}` : '';
     let parts = [title, count, proj];
     parts.push(sort);
     parts.push(launchMode);
+    if (project) parts.push(project);
     if (search) parts.push(search);
     if (searchIndexing) parts.push('{#8a8178-fg}indexing search…{/}');
     header.setContent(`\n ${parts.join(' {#3a3f46-fg}│{/} ')}`);
@@ -920,33 +982,66 @@ function createApp() {
   }
 
   // ─── Filter ────────────────────────────────────────────────────────────
-  function applyFilter() {
-    if (!filterText) {
-      filteredSessions = [...allSessions];
+  function applyFilter(options = {}) {
+    const hadFilteredResults = filteredSessions.length > 0;
+    const previousChildBase = listPanel.childBase;
+    const selectedSession = options.preserveSelection && selectedIndex >= 0
+      ? filteredSessions[selectedIndex]
+      : null;
+    filteredSessions = filterSessionList(allSessions, filterText, projectFilter);
+    if (selectedSession && filteredSessions.includes(selectedSession)) {
+      selectedIndex = filteredSessions.indexOf(selectedSession);
     } else {
-      const terms = filterText.toLowerCase().split(/\s+/);
-      filteredSessions = allSessions.filter(s => {
-        const haystack = [
-          s.project,
-          s.topic,
-          s.customTitle || '',
-          s.gitBranch || '',
-          s.sessionId,
-          s.searchText || '',
-        ].join(' ').toLowerCase();
-
-        return terms.every(t => {
-          return haystack.includes(t);
-        });
-      });
+      selectedIndex = Math.min(selectedIndex, Math.max(-1, filteredSessions.length - 1));
     }
-    selectedIndex = Math.min(selectedIndex, Math.max(-1, filteredSessions.length - 1));
-    // When filtering, select first result; when clearing, select New Session
-    if (filterText && filteredSessions.length > 0) {
+    // User-driven filtering selects the first result. Background refreshes
+    // preserve the current session so completion cannot move the highlight.
+    if (!options.preserveSelection && (filterText || projectFilter) && filteredSessions.length > 0) {
+      selectedIndex = 0;
+    } else if (options.preserveSelection && !hadFilteredResults
+        && (filterText || projectFilter) && filteredSessions.length > 0) {
+      // If indexing produced the first match for an active query, move off the
+      // New Conversation row so Enter resumes the newly visible result.
       selectedIndex = 0;
     }
-    listPanel.childBase = 0;  // reset scroll to top
+    if (options.preserveSelection) {
+      const visibleRows = Math.max(1, listPanel.height || 1);
+      const maxBase = Math.max(0, filteredSessions.length + 1 - visibleRows);
+      const selectedRow = selectedIndex + 1;
+      let nextBase = Math.min(previousChildBase, maxBase);
+      if (selectedRow < nextBase) nextBase = selectedRow;
+      if (selectedRow >= nextBase + visibleRows) nextBase = selectedRow - visibleRows + 1;
+      listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+    } else {
+      listPanel.childBase = 0;
+    }
     renderAll();
+  }
+
+  function applyPendingIndexRefresh() {
+    if (!pendingIndexRefresh || popupOpen || renameMode) return false;
+    pendingIndexRefresh = false;
+    applyFilter({ preserveSelection: true });
+    return true;
+  }
+
+  function refreshIndexedSearchResults() {
+    if (!filterText && !projectFilter) return;
+    if (popupOpen || renameMode) {
+      pendingIndexRefresh = true;
+    } else {
+      applyFilter({ preserveSelection: true });
+    }
+  }
+
+  function scheduleIndexRefresh() {
+    if ((!filterText && !projectFilter) || indexRefreshTimer) return;
+    // Throttle rather than debounce so a continuously running index cannot
+    // postpone visible search results until every transcript has finished.
+    indexRefreshTimer = setTimeout(() => {
+      indexRefreshTimer = null;
+      refreshIndexedSearchResults();
+    }, 50);
   }
 
   // ─── Sort ──────────────────────────────────────────────────────────────
@@ -992,10 +1087,14 @@ function createApp() {
     popupOpen = true;
     popup.focus(); screen.render();
     popup.on('select', (item, index) => {
-      filterText = index === 0 ? '' : uniqueProjects[index - 1];
+      projectFilter = index === 0 ? '' : uniqueProjects[index - 1];
+      pendingIndexRefresh = false;
       popup.destroy(); popupOpen = false; selectedIndex = 0; applyFilter();
     });
-    popup.key(['escape', 'q'], () => { popup.destroy(); popupOpen = false; screen.render(); });
+    popup.key(['escape', 'q'], () => {
+      popup.destroy(); popupOpen = false;
+      if (!applyPendingIndexRefresh()) screen.render();
+    });
   }
 
   // ─── Key Bindings ──────────────────────────────────────────────────────
@@ -1100,7 +1199,7 @@ function createApp() {
       if (key.name === 'escape') {
         closeRename();
         listPanel.focus();
-        screen.render();
+        if (!applyPendingIndexRefresh()) screen.render();
         return;
       }
       if (key.name === 'backspace') {
@@ -1153,7 +1252,9 @@ function createApp() {
 
     if (!isSearchMode) return;
     if (key.name === 'return' || key.name === 'enter') { isSearchMode = false; searchJustConfirmed = true; renderAll(); return; }
-    if (key.name === 'escape') { isSearchMode = false; filterText = ''; applyFilter(); return; }
+    // Escape is handled by the screen-level binding below. Keeping it in one
+    // place prevents one keypress from also clearing an active project filter.
+    if (key.name === 'escape') return;
     // Only accept printable characters (exclude control chars like \r \n \t)
     if (ch && ch.length === 1 && ch.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) { filterText += ch; selectedIndex = -1; applyFilter(); }
   });
@@ -1317,13 +1418,14 @@ function createApp() {
       popupOpen = false;
       deleteSession(session);
       footer.setContent(`\n  {#ff5d73-fg}{bold}✗ Deleted:{/} {#8a8178-fg}${session.sessionId}{/}`);
-      renderAll();
+      pendingIndexRefresh = false;
+      applyFilter({ preserveSelection: true });
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);
     });
     confirmPopup.key(['n', 'escape', 'q'], () => {
       confirmPopup.destroy();
       popupOpen = false;
-      screen.render();
+      if (!applyPendingIndexRefresh()) screen.render();
     });
   }
 
@@ -1446,7 +1548,7 @@ function createApp() {
         renameConfirmPopup = null;
         renameConfirmSession = null;
         popupOpen = false;
-        renderAll();
+        if (!applyPendingIndexRefresh()) renderAll();
       });
     }, 50);
   }
@@ -1463,7 +1565,7 @@ function createApp() {
   screen.key(['escape'], () => {
     if (renameMode) return;  // handled in keypress
     if (isSearchMode) { isSearchMode = false; filterText = ''; applyFilter(); return; }
-    filterText = ''; selectedIndex = -1; applyFilter();
+    filterText = ''; projectFilter = ''; selectedIndex = -1; applyFilter();
   });
   screen.key(['q', 'C-c'], () => {
     if (renameMode) return;
@@ -1516,19 +1618,29 @@ function createApp() {
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
-  cancelSearchIndexing = indexSessionsInBackground([...allSessions], {
+  const cancelBackgroundIndexing = indexSessionsInBackground([...allSessions], {
+    onSessionIndexed: scheduleIndexRefresh,
     onComplete: () => {
       searchIndexing = false;
-      // A search may have started while indexing was in progress. Re-run it
-      // once so newly indexed matches appear without another keypress.
-      if (filterText && !popupOpen && !renameMode) {
-        applyFilter();
+      if (indexRefreshTimer) {
+        clearTimeout(indexRefreshTimer);
+        indexRefreshTimer = null;
+      }
+      if (filterText || projectFilter) {
+        refreshIndexedSearchResults();
       } else {
         updateHeader();
         screen.render();
       }
     },
   });
+  cancelSearchIndexing = () => {
+    cancelBackgroundIndexing();
+    if (indexRefreshTimer) {
+      clearTimeout(indexRefreshTimer);
+      indexRefreshTimer = null;
+    }
+  };
 }
 
 // ─── Exports for Testing ────────────────────────────────────────────────────
@@ -1546,6 +1658,7 @@ if (typeof module !== 'undefined') {
     indexSessionsInBackground,
     isInteractiveSession,
     loadAllSessions,
+    filterSessionList,
     // Formatting
     formatTimestamp,
     formatFileSize,
@@ -1597,10 +1710,11 @@ if (require.main === module) {
     console.log(`\n${C.cyan}🔄 Checking for updates…${C.reset}\n`);
 
     try {
-      const latest = execSync('bun pm view codex-starter version 2>/dev/null', {
+      const latest = JSON.parse(execSync('npm view codex-starter version --json 2>/dev/null', {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10000,
-      }).toString().trim();
+        cwd: __dirname,
+      }).toString());
 
       if (latest === PKG.version) {
         console.log(`${C.green}✓ Already on the latest version (v${PKG.version})${C.reset}\n`);
@@ -1612,15 +1726,15 @@ if (require.main === module) {
       console.log(`${C.cyan}📦 Updating…${C.reset}\n`);
 
       try {
-        execSync('bun add -g codex-starter@latest', { stdio: 'inherit', timeout: 60000 });
+        execSync('npm install -g codex-starter@latest', { stdio: 'inherit', timeout: 60000 });
         console.log(`\n${C.green}${C.bold}✓ Updated to v${latest}${C.reset}\n`);
       } catch (e) {
         console.error(`\n${C.red}✗ Update failed. Try manually:${C.reset}`);
-        console.log(`${C.yellow}  bun add -g codex-starter@latest${C.reset}\n`);
+        console.log(`${C.yellow}  npm install -g codex-starter@latest${C.reset}\n`);
         process.exit(1);
       }
     } catch (e) {
-      console.error(`${C.red}✗ Could not check for updates (network error or Bun not found)${C.reset}\n`);
+      console.error(`${C.red}✗ Could not check for updates (network error or npm not found)${C.reset}\n`);
       process.exit(1);
     }
 

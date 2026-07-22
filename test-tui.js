@@ -164,6 +164,8 @@ const mockBlessed = {
     if (opts.parent === mockScreen && opts.left === 0 && opts.top === 4) {
       widgets.list = widget;
       widget.height = 8;
+    } else if (opts.parent === mockScreen) {
+      widgets.popupList = widget;
     }
     return widget;
   },
@@ -210,9 +212,10 @@ before(async () => {
   mod.createApp();
   assert.match(widgets.header.getContent(), /indexing search/);
   // Initial render happens synchronously; search indexing starts on the next
-  // event-loop turn and processes one transcript per turn.
-  await new Promise(resolve => setImmediate(resolve));
-  await new Promise(resolve => setImmediate(resolve));
+  // event-loop turn and streams each transcript without blocking the TUI.
+  for (let attempt = 0; attempt < 100 && /indexing search/.test(widgets.header.getContent()); attempt++) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
   assert.doesNotMatch(widgets.header.getContent(), /indexing search/);
 });
 
@@ -270,6 +273,25 @@ describe('codex starter tui', () => {
     triggerScreenKey('/');
     for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    triggerScreenKey('escape');
+  });
+
+  it('keeps the project filter when Escape clears a text search', () => {
+    triggerScreenKey('/');
+    for (const ch of 'release') triggerKeypress(ch);
+    triggerKeypress(null, 'enter');
+    triggerScreenKey('enter');
+
+    triggerScreenKey('p');
+    widgets.popupList.emit('select', null, 1);
+    assert.match(widgets.header.getContent(), /project-alpha/);
+    assert.match(widgets.header.getContent(), /release/);
+
+    triggerScreenKey('/');
+    triggerKeypress(null, 'escape');
+    triggerScreenKey('escape');
+    assert.match(widgets.header.getContent(), /project-alpha/);
+
     triggerScreenKey('escape');
   });
 

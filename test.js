@@ -21,6 +21,7 @@ const {
   indexSessionsInBackground,
   isInteractiveSession,
   loadAllSessions,
+  filterSessionList,
   formatTimestamp,
   formatFileSize,
   loadMeta,
@@ -244,7 +245,7 @@ describe('session parsing', () => {
     assert.equal(session.project, 'test/Desktop/project-beta');
   });
 
-  it('builds search text from user input and final answers only', () => {
+  it('builds search text from user input and final answers only', async () => {
     const filePath = writeSession('2026/04/13/rollout-search.jsonl', [
       {
         timestamp: '2026-04-13T03:00:00.000Z',
@@ -279,6 +280,10 @@ describe('session parsing', () => {
         },
       },
       {
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'commentary', message: 'event-commentary-marker' },
+      },
+      {
         type: 'response_item',
         payload: { type: 'reasoning', summary: ['reasoning-only-marker'] },
       },
@@ -289,6 +294,14 @@ describe('session parsing', () => {
       {
         type: 'event_msg',
         payload: { type: 'patch_apply_end', stdout: 'edit-only-marker' },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'final_answer', message: 'event-final-marker' },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'legacy-final-marker' },
       },
       {
         type: 'response_item',
@@ -302,17 +315,20 @@ describe('session parsing', () => {
     ]);
 
     const session = loadSessionQuick(filePath);
-    const searchText = buildSessionSearchText(session);
+    const searchText = await buildSessionSearchText(session);
 
     assert.match(searchText, /find the lunar widget/);
     assert.match(searchText, /release-summary-marker/);
+    assert.match(searchText, /event-final-marker/);
+    assert.match(searchText, /legacy-final-marker/);
     assert.doesNotMatch(searchText, /commentary-only-marker/);
+    assert.doesNotMatch(searchText, /event-commentary-marker/);
     assert.doesNotMatch(searchText, /reasoning-only-marker/);
     assert.doesNotMatch(searchText, /tool-only-marker/);
     assert.doesNotMatch(searchText, /edit-only-marker/);
   });
 
-  it('defers search indexing and processes sessions incrementally', () => {
+  it('defers search indexing and processes sessions incrementally', async () => {
     const sessions = [
       loadSessionQuick(path.join(SESSIONS_DIR, '2026/04/13/rollout-search.jsonl')),
       loadSessionQuick(path.join(SESSIONS_DIR, '2026/04/13/rollout-quick.jsonl')),
@@ -328,15 +344,31 @@ describe('session parsing', () => {
     });
 
     assert.equal(indexed.length, 0, 'indexing should not run before the scheduler yields');
-    scheduled.shift()();
+    await scheduled.shift()();
     assert.deepEqual(indexed, ['sess-search']);
     assert.match(sessions[0].searchText, /release-summary-marker/);
     assert.equal(completed, false);
 
-    scheduled.shift()();
+    await scheduled.shift()();
     assert.deepEqual(indexed, ['sess-search', 'sess-quick']);
-    scheduled.shift()();
+    await scheduled.shift()();
     assert.equal(completed, true);
+  });
+
+  it('keeps exact project filtering separate from full-text search', () => {
+    const sessions = [
+      { sessionId: 'alpha', project: 'project-alpha', topic: 'first topic', searchText: 'release marker' },
+      { sessionId: 'beta', project: 'project-beta', topic: 'second topic', searchText: 'mentions project-alpha release marker' },
+    ];
+
+    assert.deepEqual(
+      filterSessionList(sessions, '', 'project-alpha').map(session => session.sessionId),
+      ['alpha'],
+    );
+    assert.deepEqual(
+      filterSessionList(sessions, 'release', 'project-alpha').map(session => session.sessionId),
+      ['alpha'],
+    );
   });
 
   it('classifies exec runs as non-interactive sessions', () => {

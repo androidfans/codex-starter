@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/%F0%9F%9A%80-Codex_Starter-ff7a1a?style=for-the-badge&labelColor=141414" alt="Codex Starter" />
   <br/>
-  <img src="https://img.shields.io/badge/package_manager-Bun-f9f1e1?style=flat-square&logo=bun&logoColor=141414" alt="Bun" />
+  <img src="https://img.shields.io/badge/package_manager-npm-cb3837?style=flat-square&logo=npm&logoColor=white" alt="npm" />
   <img src="https://img.shields.io/badge/node-%3E%3D18-a3e635?style=flat-square&logo=node.js&logoColor=111111" alt="Node.js" />
   <img src="https://img.shields.io/badge/license-MIT-5ad1e6?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-ffd166?style=flat-square&logoColor=111111" alt="Platform" />
@@ -19,7 +19,7 @@
 </p>
 
 <p align="center">
-  <code>bun add -g codex-starter</code>&nbsp;&nbsp;→&nbsp;&nbsp;<code>codex-starter</code>
+  <code>npm install -g codex-starter</code>&nbsp;&nbsp;→&nbsp;&nbsp;<code>codex-starter</code>
 </p>
 
 <p align="center">
@@ -93,7 +93,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 ## Requirements
 
-- Bun >= 1.3
+- npm
 - Node.js >= 18
 - Codex CLI (`codex`) available in `PATH`
 
@@ -150,14 +150,14 @@ codex-starter
 | 📋 | **详情预览** | 显示目录、模式、消息、工具调用 |
 | 🔀 | **多种排序** | 时间 / 大小 / 消息数 / 项目 |
 | 📎 | **复制 ID** | `c` 复制 session id |
-| 🔄 | **自更新** | `--update` 检查并通过 Bun 升级到最新版本 |
+| 🔄 | **自更新** | `--update` 检查并通过 npm 升级到最新版本 |
 | 🐚 | **继承 Shell 环境** | 通过你的交互 shell 启动 `codex`，可复用 `~/.zshrc` 里的 wrapper / env |
 | 🔒 | **完全本地** | 不联网，不上传，不追踪 |
 
 ## 安装
 
 ```bash
-bun add -g codex-starter
+npm install -g codex-starter
 ```
 
 或者从源码安装：
@@ -165,8 +165,8 @@ bun add -g codex-starter
 ```bash
 git clone https://github.com/Bojun-Vvibe/codex-starter.git
 cd codex-starter
-bun install
-bun link
+npm ci
+npm install -g . --install-links
 ```
 
 然后运行：
