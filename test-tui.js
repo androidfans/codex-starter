@@ -208,6 +208,11 @@ function triggerKeypress(ch, keyName = ch) {
   for (const handler of screenKeypressHandlers) handler(ch, { name: keyName, ctrl: false, meta: false });
 }
 
+function triggerWidgetKey(widget, keyName, ch = null) {
+  const handlers = widget.__keyHandlers?.[keyName] || [];
+  for (const handler of handlers) handler(ch, { name: keyName });
+}
+
 before(async () => {
   mod.createApp();
   assert.match(widgets.header.getContent(), /indexing search/);
@@ -237,7 +242,7 @@ describe('codex starter tui', () => {
   });
 
   it('expands the conversation preview for taller detail panes', () => {
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
     widgets.detail.height = 80;
     triggerScreenKey('home');
     triggerScreenKey('down');
@@ -257,23 +262,23 @@ describe('codex starter tui', () => {
   });
 
   it('searches final answers but not commentary or tool output', () => {
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'release-summary-marker') triggerKeypress(ch);
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
 
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'tool-only-marker') triggerKeypress(ch);
     assert.ok(!widgets.list.items.some(item => item.includes('build project filter UI')));
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
   });
 
   it('searches locally renamed session titles', () => {
     triggerScreenKey('/');
     for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
   });
 
   it('keeps the project filter when Escape clears a text search', () => {
@@ -289,14 +294,27 @@ describe('codex starter tui', () => {
 
     triggerScreenKey('/');
     triggerKeypress(null, 'escape');
-    triggerScreenKey('escape');
     assert.match(widgets.header.getContent(), /project-alpha/);
 
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
+  });
+
+  it('keeps active filters when a popup is dismissed with Escape', () => {
+    triggerScreenKey('p');
+    widgets.popupList.emit('select', null, 1);
+    assert.match(widgets.header.getContent(), /project-alpha/);
+
+    triggerScreenKey('p');
+    const popup = widgets.popupList;
+    triggerKeypress(null, 'escape');
+    triggerWidgetKey(popup, 'escape');
+    assert.match(widgets.header.getContent(), /project-alpha/);
+
+    triggerKeypress(null, 'escape');
   });
 
   it('cycles explicit launch mode with m', () => {
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
     triggerScreenKey('home');
     triggerScreenKey('m');
     assert.ok(widgets.header.getContent().includes('[Full Auto]'));
@@ -305,7 +323,7 @@ describe('codex starter tui', () => {
   });
 
   it('resumes selected session with codex resume', () => {
-    triggerScreenKey('escape');
+    triggerKeypress(null, 'escape');
     triggerScreenKey('home');
     triggerScreenKey('down');
     triggerScreenKey('enter');

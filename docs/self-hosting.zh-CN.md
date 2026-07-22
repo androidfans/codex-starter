@@ -21,7 +21,7 @@ npm run test:all
 
 # 3. 用当前源码安装一份固定副本
 npm install -g . --install-links
-rehash
+hash -r
 
 # 4. 验证
 codex-starter --version
@@ -35,7 +35,7 @@ npm list -g codex-starter --depth=0
 npm ci
 npm run test:all
 npm install -g . --install-links
-rehash
+hash -r
 ```
 
 其中 `--install-links` 很重要。单独运行 `npm install -g .` 时，npm 默认可能把全局包链接回当前工作区；加上该参数后，npm 会把本地包打包并复制到全局目录，符合“修改后手动重新安装才生效”的工作方式。
@@ -91,14 +91,14 @@ npm run test:all
 
 ```bash
 bun remove -g codex-starter
-rehash
+hash -r
 ```
 
 如果使用的是当前仓库注册的 `bun link`，则在仓库根目录执行：
 
 ```bash
 bun unlink
-rehash
+hash -r
 ```
 
 如果以前已经通过 npm 安装，不必先卸载；下一步会替换同名全局包。若旧安装使用了 `sudo npm install -g`，仅在清理该包时对应执行：
@@ -115,7 +115,7 @@ sudo npm uninstall -g codex-starter
 
 ```bash
 npm install -g . --install-links
-rehash
+hash -r
 ```
 
 验证：
@@ -142,7 +142,7 @@ git push origin main
 npm ci
 npm run test:all
 npm install -g . --install-links
-rehash
+hash -r
 ```
 
 最后一次安装命令负责把刚通过测试的源码更新到全局副本。
@@ -160,7 +160,7 @@ npm run test:all
 
 # 更新本机使用的固定副本
 npm install -g . --install-links
-rehash
+hash -r
 
 git add .
 git commit -m "feat: describe my change"
@@ -181,14 +181,14 @@ npm install -g codex-starter@latest
 npm ci
 npm run test:all
 npm install -g . --install-links
-rehash
+hash -r
 ```
 
 ## 恢复使用官方版本
 
 ```bash
 npm install -g codex-starter@latest
-rehash
+hash -r
 codex-starter --version
 ```
 
@@ -203,7 +203,7 @@ codex-starter --version
 ```bash
 npm run test:all
 npm install -g . --install-links
-rehash
+hash -r
 ```
 
 ### GitHub 已发布新版本，本地为什么还是旧版本？

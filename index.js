@@ -1216,6 +1216,23 @@ function createApp() {
       return;  // swallow all keys while in rename mode
     }
 
+    // Focused popups own Escape. The screen-level keypress still fires first,
+    // so leave the filter state untouched and let the popup close itself.
+    if (key.name === 'escape') {
+      if (popupOpen) return;
+      if (isSearchMode) {
+        isSearchMode = false;
+        filterText = '';
+        applyFilter();
+        return;
+      }
+      filterText = '';
+      projectFilter = '';
+      selectedIndex = -1;
+      applyFilter();
+      return;
+    }
+
     // Backspace: delete search char, or exit search mode if empty
     if (key.name === 'backspace') {
       if (filterText) {
@@ -1252,9 +1269,6 @@ function createApp() {
 
     if (!isSearchMode) return;
     if (key.name === 'return' || key.name === 'enter') { isSearchMode = false; searchJustConfirmed = true; renderAll(); return; }
-    // Escape is handled by the screen-level binding below. Keeping it in one
-    // place prevents one keypress from also clearing an active project filter.
-    if (key.name === 'escape') return;
     // Only accept printable characters (exclude control chars like \r \n \t)
     if (ch && ch.length === 1 && ch.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) { filterText += ch; selectedIndex = -1; applyFilter(); }
   });
@@ -1560,15 +1574,10 @@ function createApp() {
   });
 
   screen.key(['m'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleLaunchMode(); });
-  screen.key(['s'], () => { if (!renameMode && !isSearchMode) cycleSort(); });
-  screen.key(['p'], () => { if (!renameMode && !isSearchMode) showProjectPicker(); });
-  screen.key(['escape'], () => {
-    if (renameMode) return;  // handled in keypress
-    if (isSearchMode) { isSearchMode = false; filterText = ''; applyFilter(); return; }
-    filterText = ''; projectFilter = ''; selectedIndex = -1; applyFilter();
-  });
+  screen.key(['s'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleSort(); });
+  screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
   screen.key(['q', 'C-c'], () => {
-    if (renameMode) return;
+    if (renameMode || popupOpen) return;
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
