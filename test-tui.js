@@ -43,6 +43,31 @@ writeSession('rollout-a.jsonl', [
     type: 'event_msg',
     payload: { type: 'agent_message', message: 'On it.' },
   },
+  {
+    timestamp: '2026-04-13T02:47:53.000Z',
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      phase: 'commentary',
+      content: [{ type: 'output_text', text: 'commentary-only-marker' }],
+    },
+  },
+  {
+    timestamp: '2026-04-13T02:47:54.000Z',
+    type: 'response_item',
+    payload: { type: 'custom_tool_call_output', output: 'tool-only-marker' },
+  },
+  {
+    timestamp: '2026-04-13T02:47:55.000Z',
+    type: 'response_item',
+    payload: {
+      type: 'message',
+      role: 'assistant',
+      phase: 'final_answer',
+      content: [{ type: 'output_text', text: 'release-summary-marker completed' }],
+    },
+  },
   ...Array.from({ length: 20 }, (_, index) => ({
     timestamp: `2026-04-13T02:48:${String(index).padStart(2, '0')}.000Z`,
     type: 'event_msg',
@@ -70,6 +95,12 @@ writeSession('rollout-b.jsonl', [
     payload: { type: 'user_message', message: 'investigate failing tests' },
   },
 ]);
+
+fs.writeFileSync(path.join(codeXDir, 'codex-starter-meta.json'), JSON.stringify({
+  sessions: {
+    'sess-a': { customTitle: 'build project filter UI — renamed-dashboard-marker' },
+  },
+}));
 
 const screenKeyHandlers = {};
 const screenKeypressHandlers = [];
@@ -175,8 +206,14 @@ function triggerKeypress(ch, keyName = ch) {
   for (const handler of screenKeypressHandlers) handler(ch, { name: keyName, ctrl: false, meta: false });
 }
 
-before(() => {
+before(async () => {
   mod.createApp();
+  assert.match(widgets.header.getContent(), /indexing search/);
+  // Initial render happens synchronously; search indexing starts on the next
+  // event-loop turn and processes one transcript per turn.
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(widgets.header.getContent(), /indexing search/);
 });
 
 after(() => {
@@ -214,6 +251,26 @@ describe('codex starter tui', () => {
     triggerKeypress('r');
     assert.ok(widgets.header.getContent().includes('/ filter'));
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+  });
+
+  it('searches final answers but not commentary or tool output', () => {
+    triggerScreenKey('escape');
+    triggerScreenKey('/');
+    for (const ch of 'release-summary-marker') triggerKeypress(ch);
+    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+
+    triggerScreenKey('escape');
+    triggerScreenKey('/');
+    for (const ch of 'tool-only-marker') triggerKeypress(ch);
+    assert.ok(!widgets.list.items.some(item => item.includes('build project filter UI')));
+    triggerScreenKey('escape');
+  });
+
+  it('searches locally renamed session titles', () => {
+    triggerScreenKey('/');
+    for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
+    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    triggerScreenKey('escape');
   });
 
   it('cycles explicit launch mode with m', () => {

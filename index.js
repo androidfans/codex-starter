@@ -434,6 +434,81 @@ function loadSessionDetail(session) {
   return session;
 }
 
+function buildSessionSearchText(session) {
+  const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
+  const userInputs = new Set();
+  const finalAnswers = new Set();
+
+  // event_msg/user_message is the canonical record for user input. Keep the
+  // response_item fallback for older or interrupted transcripts that do not
+  // have a matching event_msg entry. The Set removes duplicated records.
+  for (const line of lines) {
+    try {
+      const entry = JSON.parse(line);
+      if (entry.type === 'event_msg') {
+        const payload = entry.payload || {};
+        if (payload.type === 'user_message' && typeof payload.message === 'string') {
+          const text = payload.message.trim();
+          if (text && !isBoilerplateText(text)) userInputs.add(text);
+        }
+        continue;
+      }
+
+      if (entry.type !== 'response_item') continue;
+      const payload = entry.payload || {};
+      if (payload.type !== 'message') continue;
+
+      if (payload.role === 'user') {
+        const text = extractUserText(entry);
+        if (text) userInputs.add(text);
+      }
+
+      // Only index the answer Codex marks as final. Commentary, reasoning,
+      // tool calls/results, and patch records are intentionally excluded.
+      if (payload.role === 'assistant' && payload.phase === 'final_answer') {
+        for (const text of extractTextParts(payload.content)) {
+          const trimmed = text.trim();
+          if (trimmed) finalAnswers.add(trimmed);
+        }
+      }
+    } catch (_) { /* ignore malformed lines */ }
+  }
+
+  return [...userInputs, ...finalAnswers].join('\n').toLowerCase();
+}
+
+function indexSessionsInBackground(sessions, options = {}) {
+  const schedule = options.schedule || setImmediate;
+  const onSessionIndexed = options.onSessionIndexed || (() => {});
+  const onComplete = options.onComplete || (() => {});
+  let nextIndex = 0;
+  let cancelled = false;
+
+  function indexNextSession() {
+    if (cancelled) return;
+    if (nextIndex >= sessions.length) {
+      onComplete();
+      return;
+    }
+
+    const session = sessions[nextIndex++];
+    try {
+      session.searchText = buildSessionSearchText(session);
+      session._searchIndexError = null;
+    } catch (error) {
+      session.searchText = '';
+      session._searchIndexError = error;
+    }
+    session._searchIndexed = true;
+    onSessionIndexed(session, nextIndex, sessions.length);
+    schedule(indexNextSession);
+  }
+
+  // Always defer the first file so the initial TUI render completes first.
+  schedule(indexNextSession);
+  return () => { cancelled = true; };
+}
+
 function isInteractiveSession(session) {
   return session.source !== 'exec' && session.originator !== 'codex_exec';
 }
@@ -544,6 +619,8 @@ function createApp() {
   let isSearchMode = false;
   let sortMode = 'time';
   let launchModeId = getDefaultLaunchMode(meta);
+  let searchIndexing = allSessions.length > 0;
+  let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
   const uniqueProjects = [...new Set(allSessions.map(s => s.project))];
@@ -581,6 +658,7 @@ function createApp() {
     parts.push(sort);
     parts.push(launchMode);
     if (search) parts.push(search);
+    if (searchIndexing) parts.push('{#8a8178-fg}indexing search…{/}');
     header.setContent(`\n ${parts.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
@@ -848,7 +926,14 @@ function createApp() {
     } else {
       const terms = filterText.toLowerCase().split(/\s+/);
       filteredSessions = allSessions.filter(s => {
-        const haystack = [s.project, s.topic, s.customTitle || '', s.gitBranch || '', s.sessionId, ...(s.userMessages || [])].join(' ').toLowerCase();
+        const haystack = [
+          s.project,
+          s.topic,
+          s.customTitle || '',
+          s.gitBranch || '',
+          s.sessionId,
+          s.searchText || '',
+        ].join(' ').toLowerCase();
 
         return terms.every(t => {
           return haystack.includes(t);
@@ -1076,6 +1161,7 @@ function createApp() {
   // ─── Resume Session ─────────────────────────────────────────────────────
 
   function resumeSession(session, overrideModeId = null) {
+    cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -1102,6 +1188,7 @@ function createApp() {
   }
 
   function startNewSession(overrideModeId = null) {
+    cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -1378,7 +1465,13 @@ function createApp() {
     if (isSearchMode) { isSearchMode = false; filterText = ''; applyFilter(); return; }
     filterText = ''; selectedIndex = -1; applyFilter();
   });
-  screen.key(['q', 'C-c'], () => { if (renameMode) return; process.stdout.write('\x1b[0m'); screen.destroy(); process.exit(0); });
+  screen.key(['q', 'C-c'], () => {
+    if (renameMode) return;
+    cancelSearchIndexing();
+    process.stdout.write('\x1b[0m');
+    screen.destroy();
+    process.exit(0);
+  });
 
   // Remove blessed's built-in wheel handlers (they call select which changes selection)
   listPanel.removeAllListeners('element wheeldown');
@@ -1423,6 +1516,19 @@ function createApp() {
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
+  cancelSearchIndexing = indexSessionsInBackground([...allSessions], {
+    onComplete: () => {
+      searchIndexing = false;
+      // A search may have started while indexing was in progress. Re-run it
+      // once so newly indexed matches appear without another keypress.
+      if (filterText && !popupOpen && !renameMode) {
+        applyFilter();
+      } else {
+        updateHeader();
+        screen.render();
+      }
+    },
+  });
 }
 
 // ─── Exports for Testing ────────────────────────────────────────────────────
@@ -1436,6 +1542,8 @@ if (typeof module !== 'undefined') {
     extractUserText,
     loadSessionQuick,
     loadSessionDetail,
+    buildSessionSearchText,
+    indexSessionsInBackground,
     isInteractiveSession,
     loadAllSessions,
     // Formatting

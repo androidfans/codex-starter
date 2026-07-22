@@ -17,6 +17,8 @@ const {
   extractUserText,
   loadSessionQuick,
   loadSessionDetail,
+  buildSessionSearchText,
+  indexSessionsInBackground,
   isInteractiveSession,
   loadAllSessions,
   formatTimestamp,
@@ -240,6 +242,101 @@ describe('session parsing', () => {
     assert.deepEqual(session.toolsUsed, ['exec_command']);
     assert.equal(session.totalMessages, 2);
     assert.equal(session.project, 'test/Desktop/project-beta');
+  });
+
+  it('builds search text from user input and final answers only', () => {
+    const filePath = writeSession('2026/04/13/rollout-search.jsonl', [
+      {
+        timestamp: '2026-04-13T03:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-search',
+          timestamp: '2026-04-13T03:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-search',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'Find the lunar widget' },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Find the lunar widget' }],
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'commentary-only-marker' }],
+        },
+      },
+      {
+        type: 'response_item',
+        payload: { type: 'reasoning', summary: ['reasoning-only-marker'] },
+      },
+      {
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'tool-only-marker' },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'patch_apply_end', stdout: 'edit-only-marker' },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'The release-summary-marker is ready.' }],
+        },
+      },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    const searchText = buildSessionSearchText(session);
+
+    assert.match(searchText, /find the lunar widget/);
+    assert.match(searchText, /release-summary-marker/);
+    assert.doesNotMatch(searchText, /commentary-only-marker/);
+    assert.doesNotMatch(searchText, /reasoning-only-marker/);
+    assert.doesNotMatch(searchText, /tool-only-marker/);
+    assert.doesNotMatch(searchText, /edit-only-marker/);
+  });
+
+  it('defers search indexing and processes sessions incrementally', () => {
+    const sessions = [
+      loadSessionQuick(path.join(SESSIONS_DIR, '2026/04/13/rollout-search.jsonl')),
+      loadSessionQuick(path.join(SESSIONS_DIR, '2026/04/13/rollout-quick.jsonl')),
+    ];
+    const scheduled = [];
+    const indexed = [];
+    let completed = false;
+
+    indexSessionsInBackground(sessions, {
+      schedule: callback => scheduled.push(callback),
+      onSessionIndexed: session => indexed.push(session.sessionId),
+      onComplete: () => { completed = true; },
+    });
+
+    assert.equal(indexed.length, 0, 'indexing should not run before the scheduler yields');
+    scheduled.shift()();
+    assert.deepEqual(indexed, ['sess-search']);
+    assert.match(sessions[0].searchText, /release-summary-marker/);
+    assert.equal(completed, false);
+
+    scheduled.shift()();
+    assert.deepEqual(indexed, ['sess-search', 'sess-quick']);
+    scheduled.shift()();
+    assert.equal(completed, true);
   });
 
   it('classifies exec runs as non-interactive sessions', () => {
