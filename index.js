@@ -1576,12 +1576,19 @@ function createApp() {
   screen.key(['m'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleLaunchMode(); });
   screen.key(['s'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleSort(); });
   screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
-  screen.key(['q', 'C-c'], () => {
-    if (renameMode || popupOpen) return;
+  function quitApp() {
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
     process.exit(0);
+  }
+  screen.key(['q'], () => {
+    if (renameMode || popupOpen) return;
+    quitApp();
+  });
+  screen.key(['C-c'], () => {
+    if (renameMode) return;
+    quitApp();
   });
 
   // Remove blessed's built-in wheel handlers (they call select which changes selection)

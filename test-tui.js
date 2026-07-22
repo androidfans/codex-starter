@@ -177,7 +177,8 @@ require.cache[require.resolve('blessed')] = { exports: mockBlessed };
 require.cache[stringWidthPath] = { exports: input => String(input).length };
 
 const originalExit = process.exit;
-process.exit = () => {};
+let exitCallCount = 0;
+process.exit = () => { exitCallCount++; };
 
 const originalStdoutWrite = process.stdout.write;
 process.stdout.write = () => true;
@@ -340,5 +341,12 @@ describe('codex starter tui', () => {
     const lastCall = spawnCalls.at(-1);
     assert.ok(lastCall.args.at(-1).includes('codex --dangerously-bypass-approvals-and-sandbox'));
     assert.equal(mod.loadMeta().defaultLaunchMode, 'danger');
+  });
+
+  it('allows Ctrl-C to quit while a popup is open', () => {
+    triggerScreenKey('p');
+    const previousExitCallCount = exitCallCount;
+    triggerScreenKey('C-c');
+    assert.equal(exitCallCount, previousExitCallCount + 1);
   });
 });
