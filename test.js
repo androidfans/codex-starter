@@ -117,12 +117,12 @@ describe('helpers', () => {
     assert.deepEqual(detectCLI(), { name: 'codex', cmd: 'codex' });
   });
 
-  it('disables job control in the nested interactive zsh', () => {
+  it('disables job control before nested interactive zsh initialization', () => {
     const originalShell = process.env.SHELL;
     process.env.SHELL = '/bin/zsh';
     assert.deepEqual(getShellCommand('codex resume abc'), {
       shellPath: '/bin/zsh',
-      shellArgs: ['-ic', 'unsetopt MONITOR; codex resume abc'],
+      shellArgs: ['+m', '-ic', 'unsetopt MONITOR; codex resume abc'],
     });
     process.env.SHELL = originalShell;
   });

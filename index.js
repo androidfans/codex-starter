@@ -34,10 +34,13 @@ const CLI = detectCLI();
 function getShellCommand(command) {
   const shellPath = process.env.SHELL || '/bin/sh';
   const shellName = path.basename(shellPath);
-  // A nested interactive zsh can stop on SIGTTOU while restoring terminal
-  // control after Codex exits. Disabling job control avoids that handoff.
+  // Disable zsh job control before interactive-shell initialization. Doing it
+  // inside the command is too late: zsh has already created a new process
+  // group and taken terminal control by then, which can leave the parent
+  // starter in the background and suspend it with SIGTTOU during exit.
   const shellCommand = shellName === 'zsh' ? `unsetopt MONITOR; ${command}` : command;
-  return { shellPath, shellArgs: ['-ic', shellCommand] };
+  const shellArgs = shellName === 'zsh' ? ['+m', '-ic', shellCommand] : ['-ic', shellCommand];
+  return { shellPath, shellArgs };
 }
 
 function getLaunchMode(modeId) {
@@ -1486,7 +1489,7 @@ if (require.main === module) {
     console.log(`\n${C.cyan}🔄 Checking for updates…${C.reset}\n`);
 
     try {
-      const latest = execSync('npm view codex-starter version 2>/dev/null', {
+      const latest = execSync('bun pm view codex-starter version 2>/dev/null', {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10000,
       }).toString().trim();
@@ -1501,15 +1504,15 @@ if (require.main === module) {
       console.log(`${C.cyan}📦 Updating…${C.reset}\n`);
 
       try {
-        execSync('npm install -g codex-starter@latest', { stdio: 'inherit', timeout: 60000 });
+        execSync('bun add -g codex-starter@latest', { stdio: 'inherit', timeout: 60000 });
         console.log(`\n${C.green}${C.bold}✓ Updated to v${latest}${C.reset}\n`);
       } catch (e) {
         console.error(`\n${C.red}✗ Update failed. Try manually:${C.reset}`);
-        console.log(`${C.yellow}  npm install -g codex-starter@latest${C.reset}\n`);
+        console.log(`${C.yellow}  bun add -g codex-starter@latest${C.reset}\n`);
         process.exit(1);
       }
     } catch (e) {
-      console.error(`${C.red}✗ Could not check for updates (network error or npm not found)${C.reset}\n`);
+      console.error(`${C.red}✗ Could not check for updates (network error or Bun not found)${C.reset}\n`);
       process.exit(1);
     }
 
