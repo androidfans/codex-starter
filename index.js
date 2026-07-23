@@ -81,12 +81,12 @@ function switchToAbcInputSource(platform = process.platform, runCommand = spawnS
   // only tools included with macOS and does not require Accessibility access.
   const script = [
     'ObjC.import("Carbon");',
-    `const id = $("${ABC_INPUT_SOURCE_ID}");`,
-    'const filter = $.NSDictionary.dictionaryWithObjectForKey(id, $.kTISPropertyInputSourceID);',
+    'ObjC.bindFunction("TISCreateInputSourceList", ["id", ["id", "bool"]]);',
+    'ObjC.bindFunction("TISSelectInputSource", ["int", ["id"]]);',
+    `const filter = $({"TISPropertyInputSourceID": "${ABC_INPUT_SOURCE_ID}"});`,
     'const sources = $.TISCreateInputSourceList(filter, false);',
-    'if ($.CFArrayGetCount(sources) === 0) throw new Error("ABC input source not found");',
-    'const source = $.CFArrayGetValueAtIndex(sources, 0);',
-    'const status = $.TISSelectInputSource(source);',
+    'if (Number(sources.count) === 0) throw new Error("ABC input source not found");',
+    'const status = $.TISSelectInputSource(sources.objectAtIndex(0));',
     'if (status !== 0) throw new Error("TISSelectInputSource failed: " + status);',
   ].join(' ');
 

@@ -177,6 +177,8 @@ describe('helpers', () => {
     assert.equal(calls[1].command, '/usr/bin/osascript');
     assert.deepEqual(calls[1].args.slice(0, 3), ['-l', 'JavaScript', '-e']);
     assert.match(calls[1].args[3], /com\.apple\.keylayout\.ABC/);
+    assert.match(calls[1].args[3], /ObjC\.bindFunction\("TISSelectInputSource"/);
+    assert.match(calls[1].args[3], /sources\.objectAtIndex\(0\)/);
   });
 
   it('does not switch input sources outside macOS', () => {
