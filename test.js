@@ -34,6 +34,7 @@ const {
   getLaunchMode,
   buildCodexCommand,
   switchToAbcInputSource,
+  createInputSourceActivator,
   detectCLI,
   getShellCommand,
   CODEX_DIR,
@@ -185,6 +186,22 @@ describe('helpers', () => {
     let called = false;
     assert.equal(switchToAbcInputSource('linux', () => { called = true; }), false);
     assert.equal(called, false);
+  });
+
+  it('debounces repeated input-source activation', () => {
+    let currentTime = 1000;
+    let switchCount = 0;
+    const activate = createInputSourceActivator(
+      () => { switchCount++; return true; },
+      () => currentTime,
+    );
+
+    assert.equal(activate(), true);
+    currentTime = 1100;
+    assert.equal(activate(), false);
+    currentTime = 1250;
+    assert.equal(activate(), true);
+    assert.equal(switchCount, 2);
   });
 });
 

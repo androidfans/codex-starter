@@ -98,6 +98,20 @@ function switchToAbcInputSource(platform = process.platform, runCommand = spawnS
   }
 }
 
+function createInputSourceActivator(
+  switchInputSource = switchToAbcInputSource,
+  now = Date.now,
+  debounceMs = 250,
+) {
+  let lastActivationAt = -Infinity;
+  return function activateInputSource() {
+    const currentTime = now();
+    if (currentTime - lastActivationAt < debounceMs) return false;
+    lastActivationAt = currentTime;
+    return switchInputSource();
+  };
+}
+
 // ─── Color Palette (Ember Terminal) ──────────────────────────────────────────
 const PROJECT_COLORS = [
   '#ff7a1a', '#ffd166', '#5ad1e6', '#a3e635',
@@ -960,7 +974,7 @@ function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp() {
+function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
   const allSessions = loadAllSessions();
   const meta = loadMeta();
 
@@ -1000,6 +1014,22 @@ function createApp() {
     fullUnicode: true,
     autoPadding: true,
     dockBorders: true,
+    sendFocus: true,
+  });
+
+  // Terminal focus reporting also covers tmux pane/window selection when
+  // tmux has focus-events enabled. Arm the mouse fallback only after blur so
+  // ordinary TUI clicks never launch synchronous input-source subprocesses.
+  let inputSourceActivationPending = false;
+  screen.on('blur', () => { inputSourceActivationPending = true; });
+  screen.on('focus', () => {
+    inputSourceActivationPending = false;
+    activateInputSource();
+  });
+  screen.on('mousedown', () => {
+    if (!inputSourceActivationPending) return;
+    inputSourceActivationPending = false;
+    activateInputSource();
   });
 
   // Force screen-level fill color so no terminal bg leaks through
@@ -2094,6 +2124,7 @@ if (typeof module !== 'undefined') {
     getLaunchMode,
     buildCodexCommand,
     switchToAbcInputSource,
+    createInputSourceActivator,
     // List mode (for integration tests)
     runListMode,
     // TUI (for interaction tests)
@@ -2192,6 +2223,7 @@ TUI Keyboard Shortcuts:
     process.exit(0);
   }
 
-  switchToAbcInputSource();
-  createApp();
+  const activateInputSource = createInputSourceActivator();
+  activateInputSource();
+  createApp({ activateInputSource });
 }
