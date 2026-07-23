@@ -245,6 +245,34 @@ describe('session parsing', () => {
     assert.equal(session.project, 'test/Desktop/project-beta');
   });
 
+  it('keeps a cleared custom title cleared after reloading', () => {
+    const filePath = writeSession('2026/04/13/rollout-title-cleared.jsonl', [
+      {
+        timestamp: '2026-04-13T02:31:02.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-title-cleared',
+          timestamp: '2026-04-13T02:31:02.000Z',
+          cwd: '/Users/test/Desktop/project-title',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'title persistence test' },
+      },
+      { type: 'custom-title', customTitle: 'Old title' },
+      { type: 'custom-title', customTitle: '' },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    assert.equal(session.customTitle, '');
+
+    loadSessionDetail(session);
+    assert.equal(session.customTitle, '');
+  });
+
   it('builds search text from user input and final answers only', async () => {
     const filePath = writeSession('2026/04/13/rollout-search.jsonl', [
       {
@@ -369,6 +397,22 @@ describe('session parsing', () => {
       filterSessionList(sessions, 'release', 'project-alpha').map(session => session.sessionId),
       ['alpha'],
     );
+  });
+
+  it('searches both live custom titles and indexed transcript text', () => {
+    const sessions = [
+      {
+        sessionId: 'alpha',
+        project: 'project-alpha',
+        topic: 'first topic',
+        customTitle: 'Launch Checklist',
+        searchText: 'transcript-only marker',
+      },
+    ];
+
+    assert.deepEqual(filterSessionList(sessions, 'checklist'), sessions);
+    assert.deepEqual(filterSessionList(sessions, 'transcript-only'), sessions);
+    assert.deepEqual(filterSessionList(sessions, 'checklist marker'), sessions);
   });
 
   it('classifies exec runs as non-interactive sessions', () => {

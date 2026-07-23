@@ -178,6 +178,21 @@ function extractTextParts(content) {
   return texts;
 }
 
+function getCustomTitleUpdate(entry) {
+  if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
+    return entry.customTitle;
+  }
+
+  if (entry.type === 'response_item') {
+    const payload = entry.payload || {};
+    if (payload.type === 'custom-title' && typeof payload.customTitle === 'string') {
+      return payload.customTitle;
+    }
+  }
+
+  return null;
+}
+
 function isBoilerplateText(text) {
   const normalized = String(text || '').trim();
   if (!normalized) return true;
@@ -310,11 +325,8 @@ function loadSessionQuick(filePath) {
       const assistantText = extractAssistantText(entry);
       if (assistantText) assistantMsgCount++;
 
-      if (entry.type === 'response_item') {
-        const payload = entry.payload || {};
-        if (payload.type === 'custom-title' && payload.customTitle) customTitle = payload.customTitle;
-      }
-      if (entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+      const titleUpdate = getCustomTitleUpdate(entry);
+      if (titleUpdate !== null) customTitle = titleUpdate;
     } catch (_) { /* ignore */ }
   }
 
@@ -324,7 +336,8 @@ function loadSessionQuick(filePath) {
         const entry = JSON.parse(line);
         const ts = getEntryTimestamp(entry);
         if (ts) lastTs = ts;
-        if (!customTitle && entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+        const titleUpdate = getCustomTitleUpdate(entry);
+        if (titleUpdate !== null) customTitle = titleUpdate;
       } catch (_) { /* ignore */ }
     }
   }
@@ -421,7 +434,8 @@ function loadSessionDetail(session) {
         const payload = entry.payload || {};
         if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
       }
-      if (entry.type === 'custom-title' && entry.customTitle) session.customTitle = entry.customTitle;
+      const titleUpdate = getCustomTitleUpdate(entry);
+      if (titleUpdate !== null) session.customTitle = titleUpdate;
     } catch (_) { /* ignore */ }
   }
 
@@ -572,15 +586,17 @@ function filterSessionList(sessions, filterText = '', projectFilter = '') {
   return sessions.filter(session => {
     if (projectFilter && session.project !== projectFilter) return false;
     if (terms.length === 0) return true;
-    const haystack = [
+    const metadataHaystack = [
       session.project,
       session.topic,
       session.customTitle || '',
       session.gitBranch || '',
       session.sessionId,
-      session.searchText || '',
     ].join(' ').toLowerCase();
-    return terms.every(term => haystack.includes(term));
+    const transcriptHaystack = session.searchText || '';
+    return terms.every(term => (
+      metadataHaystack.includes(term) || transcriptHaystack.includes(term)
+    ));
   });
 }
 
@@ -1523,8 +1539,8 @@ function createApp() {
     // Update in-memory session
     session.customTitle = newTitle;
 
-    // Also append to JSONL so the title survives future resumes
-    if (newTitle && fs.existsSync(session.filePath)) {
+    // Also append to JSONL so setting or clearing the title survives restarts.
+    if (fs.existsSync(session.filePath)) {
       try {
         const entry = JSON.stringify({ type: 'custom-title', customTitle: newTitle });
         fs.appendFileSync(session.filePath, '\n' + entry);

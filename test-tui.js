@@ -157,6 +157,7 @@ const mockBlessed = {
     if (opts.parent === mockScreen && opts.top === 0) widgets.header = widget;
     if (opts.parent === mockScreen && opts.bottom === 0) widgets.footer = widget;
     if (opts.parent === mockScreen && String(opts.left).includes('50%')) widgets.detail = widget;
+    if (String(opts.label).includes('Renamed')) widgets.renameConfirm = widget;
     return widget;
   },
   list: (opts) => {
@@ -280,6 +281,23 @@ describe('codex starter tui', () => {
     for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
     assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
     triggerKeypress(null, 'escape');
+  });
+
+  it('persists clearing a renamed session title', async () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('r');
+    for (let i = 0; i < 80; i++) triggerKeypress(null, 'backspace');
+    triggerKeypress(null, 'enter');
+
+    const transcript = fs.readFileSync(path.join(sessionsDir, 'rollout-a.jsonl'), 'utf-8');
+    assert.deepEqual(JSON.parse(transcript.trim().split('\n').at(-1)), {
+      type: 'custom-title',
+      customTitle: '',
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 220));
+    triggerWidgetKey(widgets.renameConfirm, 'escape');
   });
 
   it('keeps the project filter when Escape clears a text search', () => {
