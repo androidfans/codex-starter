@@ -67,7 +67,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 - Full conversation history in an independently scrollable preview
 - Automatically switches macOS to the ABC input source on startup and focus
 - Resume selected session with `Enter`
-- Rename selected session with `r`
+- Rename the selected conversation family or version with `r`
 - Delete selected session with `x`
 - Copy session id with `c`
 - Self-update with `--update`
@@ -88,7 +88,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 | `p` | Filter by project |
 | `s` | Cycle sort mode |
 | `c` | Copy session ID |
-| `r` | Rename selected session |
+| `r` | Rename selected conversation family or version |
 | `x` / `Delete` | Delete selected session |
 | `Home` / `End` | Jump to first / last |
 | `Ctrl-D` / `Ctrl-U` | Page down / up |

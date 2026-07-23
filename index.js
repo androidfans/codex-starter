@@ -145,6 +145,10 @@ function getSessionMeta(meta, sessionId) {
   return meta.sessions[sessionId] || {};
 }
 
+function getFamilyMeta(meta, familyId) {
+  return (meta.families && meta.families[familyId]) || {};
+}
+
 // ─── Data Layer ──────────────────────────────────────────────────────────────
 
 function getProjectDisplayName(cwd) {
@@ -693,23 +697,26 @@ function loadAllSessions() {
   return sessions;
 }
 
+function sessionMatchesFilter(session, terms, projectFilter = '', additionalText = '') {
+  if (projectFilter && session.project !== projectFilter) return false;
+  if (terms.length === 0) return true;
+  const metadataHaystack = [
+    session.project,
+    session.topic,
+    session.customTitle || '',
+    session.gitBranch || '',
+    session.sessionId,
+    additionalText,
+  ].join(' ').toLowerCase();
+  const transcriptHaystack = session.searchText || '';
+  return terms.every(term => (
+    metadataHaystack.includes(term) || transcriptHaystack.includes(term)
+  ));
+}
+
 function filterSessionList(sessions, filterText = '', projectFilter = '') {
   const terms = filterText.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return sessions.filter(session => {
-    if (projectFilter && session.project !== projectFilter) return false;
-    if (terms.length === 0) return true;
-    const metadataHaystack = [
-      session.project,
-      session.topic,
-      session.customTitle || '',
-      session.gitBranch || '',
-      session.sessionId,
-    ].join(' ').toLowerCase();
-    const transcriptHaystack = session.searchText || '';
-    return terms.every(term => (
-      metadataHaystack.includes(term) || transcriptHaystack.includes(term)
-    ));
-  });
+  return sessions.filter(session => sessionMatchesFilter(session, terms, projectFilter));
 }
 
 function sessionTimestamp(session) {
@@ -1220,7 +1227,11 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
       const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
       const topicMaxLen = Math.max(0, listW - fixedLen);
-      let topic = session.customTitle || session.topic;
+      const familyTitle = row.kind === 'family'
+        ? getFamilyMeta(meta, row.family.familyId).customTitle || ''
+        : '';
+      const hasCustomTitle = Boolean(familyTitle || session.customTitle);
+      let topic = familyTitle || session.customTitle || session.topic;
 
       if (topic.length > topicMaxLen) {
         topic = topicMaxLen > 1 ? topic.substring(0, topicMaxLen - 1) + '…' : '';
@@ -1234,7 +1245,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         : '';
       const metadata = compactFamily ? '' : `${proj} ${time} `;
       let label = `{#8a8178-fg}${marker}{/}${familyBadge}${metadata}${versionLabel}`;
-      if (session.customTitle) {
+      if (hasCustomTitle) {
         label += `{#5bd1b9-fg}{bold}${esc(topic)}{/}`;
       } else {
         label += `{#e7dccf-fg}${esc(topic)}{/}`;
@@ -1393,11 +1404,15 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     const color = getProjectColor(session.project, projectColorMap);
     let metaContent = '';
     const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
+    const familyTitle = selectedRow.kind === 'family'
+      ? getFamilyMeta(meta, selectedRow.family.familyId).customTitle || ''
+      : '';
+    const selectedTitle = familyTitle || session.customTitle || '';
 
     // Title
     metaContent += ` {${color}-fg}{bold}█ ${session.project}{/}\n`;
-    if (session.customTitle) {
-      metaContent += ` {#5bd1b9-fg}{bold}${esc(session.customTitle)}{/}\n`;
+    if (selectedTitle) {
+      metaContent += ` {#5bd1b9-fg}{bold}${esc(selectedTitle)}{/}\n`;
     }
     metaContent += sep + '\n\n';
 
@@ -1485,15 +1500,17 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         && displayRows[selectedIndex]
       ? displayRows[selectedIndex].key
       : null;
-    const matchingSessions = filterSessionList(allSessions, filterText, projectFilter);
-    const matchingIds = new Set(matchingSessions.map(session => session.sessionId));
+    const terms = filterText.trim().toLowerCase().split(/\s+/).filter(Boolean);
     allFamilies = buildSessionFamilies(allSessions);
     // Product decision: matching any version includes its family, while the
     // collapsed family row always stays pinned to Latest. Expand it to resume
     // the exact historical version that matched.
-    filteredFamilies = allFamilies.filter(family => (
-      family.members.some(member => matchingIds.has(member.sessionId))
-    ));
+    filteredFamilies = allFamilies.filter(family => {
+      const familyTitle = getFamilyMeta(meta, family.familyId).customTitle || '';
+      return family.members.some(member => (
+        sessionMatchesFilter(member, terms, projectFilter, familyTitle)
+      ));
+    });
     displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
     const preservedIndex = selectedRowKey
       ? displayRows.findIndex(row => row.key === selectedRowKey)
@@ -1729,10 +1746,10 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     // ── Rename mode: capture all input ──
     if (renameMode) {
       if (key.name === 'return' || key.name === 'enter') {
-        const session = renameSession;
+        const target = renameTarget;
         const value = renameValue;
         closeRename();
-        submitRename(session, value);
+        submitRename(target, value);
         return;
       }
       if (key.name === 'escape') {
@@ -2001,7 +2018,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let renameMode = false;
   let renameJustFinished = false;
   let renameValue = '';
-  let renameSession = null;
+  let renameTarget = null;
   let renamePopup = null;
   let renameDisplay = null;
   const renameMaxWidth = 46;
@@ -2015,14 +2032,17 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     screen.render();
   }
 
-  function showRenameInput(session) {
-    renameSession = session;
-    renameValue = session.customTitle || '';
+  function showRenameInput(row) {
+    renameTarget = row;
+    const isFamily = row.kind === 'family';
+    renameValue = isFamily
+      ? getFamilyMeta(meta, row.family.familyId).customTitle || ''
+      : row.session.customTitle || '';
 
     renamePopup = blessed.box({
       parent: screen, top: 'center', left: 'center',
       width: 52, height: 7,
-      label: ' {bold}{#5bd1b9-fg}Rename Session{/} ',
+      label: ` {bold}{#5bd1b9-fg}Rename ${isFamily ? 'Conversation' : 'Version'}{/} `,
       tags: true, border: { type: 'line' },
       style: {
         border: { fg: '#5bd1b9' }, bg: '#1d1f24', fg: '#e7dccf',
@@ -2054,29 +2074,39 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     renameMode = false;
     if (renamePopup) { renamePopup.destroy(); renamePopup = null; }
     popupOpen = false;
-    renameSession = null;
+    renameTarget = null;
     renameDisplay = null;
   }
 
-  function submitRename(session, newTitle) {
+  function submitRename(row, newTitle) {
+    if (!row) return;
     newTitle = (newTitle || '').trim();
+    const session = row.session;
 
-    // Save to meta
-    if (!meta.sessions[session.sessionId]) meta.sessions[session.sessionId] = {};
-    meta.sessions[session.sessionId].customTitle = newTitle || undefined;
-    if (!newTitle) delete meta.sessions[session.sessionId].customTitle;
-    saveMeta(meta);
+    if (row.kind === 'family') {
+      if (!meta.families) meta.families = {};
+      if (newTitle) {
+        meta.families[row.family.familyId] = { customTitle: newTitle };
+      } else {
+        delete meta.families[row.family.familyId];
+        if (Object.keys(meta.families).length === 0) delete meta.families;
+      }
+    } else {
+      if (!meta.sessions[session.sessionId]) meta.sessions[session.sessionId] = {};
+      meta.sessions[session.sessionId].customTitle = newTitle || undefined;
+      if (!newTitle) delete meta.sessions[session.sessionId].customTitle;
 
-    // Update in-memory session
-    session.customTitle = newTitle;
-
-    // Also append to JSONL so setting or clearing the title survives restarts.
-    if (fs.existsSync(session.filePath)) {
-      try {
-        const entry = JSON.stringify({ type: 'custom-title', customTitle: newTitle });
-        fs.appendFileSync(session.filePath, '\n' + entry);
-      } catch (e) { /* silently fail */ }
+      // Version titles are also written to their rollout. Family titles stay
+      // local because no single JSONL file represents the whole family.
+      session.customTitle = newTitle;
+      if (fs.existsSync(session.filePath)) {
+        try {
+          const entry = JSON.stringify({ type: 'custom-title', customTitle: newTitle });
+          fs.appendFileSync(session.filePath, '\n' + entry);
+        } catch (e) { /* silently fail */ }
+      }
     }
+    saveMeta(meta);
 
     renderAll();
 
@@ -2117,7 +2147,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   screen.key(['r'], () => {
     if (isSearchMode || popupOpen) return;
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
-    showRenameInput(displayRows[selectedIndex].session);
+    showRenameInput(displayRows[selectedIndex]);
   });
 
   screen.key(['m'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleLaunchMode(); });
