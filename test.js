@@ -33,6 +33,7 @@ const {
   setDefaultLaunchMode,
   getLaunchMode,
   buildCodexCommand,
+  switchToAbcInputSource,
   detectCLI,
   getShellCommand,
   CODEX_DIR,
@@ -147,6 +148,41 @@ describe('helpers', () => {
     assert.equal(buildCodexCommand({ modeId: 'default' }), 'codex');
     assert.equal(buildCodexCommand({ sessionId: 'sess-123', modeId: 'full-auto' }), 'codex --full-auto resume sess-123');
     assert.equal(buildCodexCommand({ sessionId: 'sess-123', modeId: 'danger' }), 'codex --dangerously-bypass-approvals-and-sandbox resume sess-123');
+  });
+
+  it('switches macOS input to ABC with macism', () => {
+    const calls = [];
+    const runCommand = (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    };
+
+    assert.equal(switchToAbcInputSource('darwin', runCommand), true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, 'macism');
+    assert.deepEqual(calls[0].args, ['com.apple.keylayout.ABC']);
+    assert.equal(calls[0].options.timeout, 1000);
+  });
+
+  it('falls back to the built-in macOS input-source API', () => {
+    const calls = [];
+    const runCommand = (command, args) => {
+      calls.push({ command, args });
+      if (command === 'macism') return { status: null, error: { code: 'ENOENT' } };
+      return { status: 0 };
+    };
+
+    assert.equal(switchToAbcInputSource('darwin', runCommand), true);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].command, '/usr/bin/osascript');
+    assert.deepEqual(calls[1].args.slice(0, 3), ['-l', 'JavaScript', '-e']);
+    assert.match(calls[1].args[3], /com\.apple\.keylayout\.ABC/);
+  });
+
+  it('does not switch input sources outside macOS', () => {
+    let called = false;
+    assert.equal(switchToAbcInputSource('linux', () => { called = true; }), false);
+    assert.equal(called, false);
   });
 });
 
