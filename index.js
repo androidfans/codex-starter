@@ -17,6 +17,7 @@ const blessed = require('blessed');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const { StringDecoder } = require('string_decoder');
 const { spawn, execSync, spawnSync } = require('child_process');
 const os = require('os');
 
@@ -149,6 +150,39 @@ function readHeadText(filePath, bytes = 256 * 1024) {
     fs.closeSync(fd);
   }
   return buffer.toString('utf-8');
+}
+
+function readLeadingSessionMetaEntries(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  const decoder = new StringDecoder('utf8');
+  const entries = [];
+  let pending = '';
+
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) pending += decoder.end();
+      else pending += decoder.write(buffer.subarray(0, bytesRead));
+
+      let newlineIndex;
+      while ((newlineIndex = pending.indexOf('\n')) !== -1 || (bytesRead === 0 && pending)) {
+        const line = newlineIndex === -1 ? pending : pending.substring(0, newlineIndex);
+        pending = newlineIndex === -1 ? '' : pending.substring(newlineIndex + 1);
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type !== 'session_meta') return entries;
+          entries.push(entry);
+        } catch (_) {
+          return entries;
+        }
+      }
+      if (bytesRead === 0) return entries;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function readTailText(filePath, bytes = 16 * 1024) {
@@ -287,6 +321,9 @@ function loadSessionQuick(filePath) {
   let modelProvider = '';
   let source = '';
   let originator = '';
+  let forkedFromId = '';
+  let threadSource = '';
+  const ancestorIds = [];
   let firstUserMsg = '';
   let userMsgCount = 0;
   let assistantMsgCount = 0;
@@ -305,8 +342,22 @@ function loadSessionQuick(filePath) {
         modelProvider = payload.model_provider || '';
         source = payload.source || '';
         originator = payload.originator || '';
+        forkedFromId = payload.forked_from_id || '';
+        threadSource = payload.thread_source || '';
       }
     } catch (_) { /* ignore */ }
+  }
+
+  // Fork history begins with one session_meta per inherited generation. Read
+  // that contiguous prefix without a byte cap so deep edit chains retain
+  // enough ancestry to survive deletion of intermediate rollout files.
+  for (const metaEntry of readLeadingSessionMetaEntries(filePath)) {
+    const payload = metaEntry.payload || {};
+    for (const candidate of [payload.id, payload.forked_from_id]) {
+      if (candidate && candidate !== sessionId && !ancestorIds.includes(candidate)) {
+        ancestorIds.push(candidate);
+      }
+    }
   }
 
   for (const line of headText.split('\n').filter(Boolean)) {
@@ -385,6 +436,9 @@ function loadSessionQuick(filePath) {
     cwd,
     source,
     originator,
+    forkedFromId,
+    threadSource,
+    ancestorIds,
     modelProvider,
     fileSize: stat.size,
     duration: durationStr,
@@ -402,11 +456,17 @@ function loadSessionDetail(session) {
   const assistantSnippets = [];
   const toolsUsed = new Set();
   let totalMessages = 0;
+  let canonicalMetaLoaded = false;
 
   for (const line of lines) {
     try {
       const entry = JSON.parse(line);
-      if (entry.type === 'session_meta') {
+      // Fork rollouts contain inherited session_meta records from their
+      // ancestors. Only the first record describes this file's canonical
+      // thread; applying later records would replace the child UUID with a
+      // parent UUID.
+      if (entry.type === 'session_meta' && !canonicalMetaLoaded) {
+        canonicalMetaLoaded = true;
         const payload = entry.payload || {};
         session.sessionId = payload.id || session.sessionId;
         session.firstTs = payload.timestamp || session.firstTs;
@@ -416,6 +476,8 @@ function loadSessionDetail(session) {
         session.modelProvider = payload.model_provider || session.modelProvider;
         session.source = payload.source || session.source;
         session.originator = payload.originator || session.originator;
+        session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+        session.threadSource = payload.thread_source || session.threadSource || '';
       }
 
       const userText = extractUserText(entry);
@@ -564,7 +626,12 @@ function indexSessionsInBackground(sessions, options = {}) {
 }
 
 function isInteractiveSession(session) {
-  return session.source !== 'exec' && session.originator !== 'codex_exec';
+  const threadSource = typeof session.threadSource === 'string'
+    ? session.threadSource
+    : JSON.stringify(session.threadSource || '');
+  return session.source !== 'exec'
+    && session.originator !== 'codex_exec'
+    && !threadSource.toLowerCase().includes('subagent');
 }
 
 function loadAllSessions() {
@@ -598,6 +665,195 @@ function filterSessionList(sessions, filterText = '', projectFilter = '') {
       metadataHaystack.includes(term) || transcriptHaystack.includes(term)
     ));
   });
+}
+
+function sessionTimestamp(session) {
+  const value = new Date(session.lastTs || session.firstTs || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Build a forest of Codex conversations from forked_from_id links.
+ *
+ * A family is intentionally separate from its root session: the root remains
+ * an independently resumable version when the family is expanded.
+ */
+function buildSessionFamilies(sessions) {
+  const sessionById = new Map();
+  const inputIndex = new Map();
+  sessions.forEach((session, index) => {
+    if (!session || !session.sessionId || sessionById.has(session.sessionId)) return;
+    sessionById.set(session.sessionId, session);
+    inputIndex.set(session.sessionId, index);
+  });
+
+  function parentIdFor(session) {
+    const candidates = [session.forkedFromId, ...(session.ancestorIds || [])]
+      .filter(candidate => candidate && candidate !== session.sessionId);
+    const existingParent = candidates.find(candidate => (
+      sessionById.has(candidate)
+    ));
+    // If every ancestor rollout is gone, the oldest known UUID is the stable
+    // key shared by descendants from otherwise different deleted branches.
+    return existingParent || candidates.at(-1) || '';
+  }
+
+  const rootIdFor = new Map();
+  function resolveRootId(startId) {
+    if (rootIdFor.has(startId)) return rootIdFor.get(startId);
+    const pathIds = [];
+    const positions = new Map();
+    let currentId = startId;
+    let rootId = startId;
+
+    while (sessionById.has(currentId)) {
+      if (rootIdFor.has(currentId)) {
+        rootId = rootIdFor.get(currentId);
+        break;
+      }
+      if (positions.has(currentId)) {
+        const cycle = pathIds.slice(positions.get(currentId));
+        rootId = [...cycle].sort()[0] || startId;
+        break;
+      }
+      positions.set(currentId, pathIds.length);
+      pathIds.push(currentId);
+      const parentId = parentIdFor(sessionById.get(currentId));
+      if (!parentId) {
+        rootId = currentId;
+        break;
+      }
+      if (!sessionById.has(parentId)) {
+        // Keep siblings grouped after their common parent rollout is deleted.
+        // The missing UUID remains a stable synthetic family key.
+        rootId = parentId;
+        break;
+      }
+      currentId = parentId;
+    }
+
+    for (const id of pathIds) rootIdFor.set(id, rootId);
+    return rootId;
+  }
+
+  const grouped = new Map();
+  for (const session of sessionById.values()) {
+    const rootId = resolveRootId(session.sessionId);
+    if (!grouped.has(rootId)) grouped.set(rootId, []);
+    grouped.get(rootId).push(session);
+  }
+
+  const families = [];
+  for (const [familyId, members] of grouped) {
+    const memberIds = new Set(members.map(member => member.sessionId));
+    const childrenById = new Map(members.map(member => [member.sessionId, []]));
+    const parentById = new Map();
+    for (const member of members) {
+      const parentId = parentIdFor(member);
+      parentById.set(member.sessionId, parentId);
+      if (parentId && memberIds.has(parentId) && parentId !== member.sessionId) {
+        childrenById.get(parentId).push(member);
+      }
+    }
+    const compareMembers = (a, b) => sessionTimestamp(a) - sessionTimestamp(b)
+      || (inputIndex.get(a.sessionId) || 0) - (inputIndex.get(b.sessionId) || 0)
+      || a.sessionId.localeCompare(b.sessionId);
+    for (const children of childrenById.values()) children.sort(compareMembers);
+    members.sort(compareMembers);
+
+    const leaves = members.filter(member => (childrenById.get(member.sessionId) || []).length === 0);
+    const newest = list => [...list].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a)
+      || (inputIndex.get(a.sessionId) || 0) - (inputIndex.get(b.sessionId) || 0)
+      || b.sessionId.localeCompare(a.sessionId))[0];
+    const newestLeaf = newest(leaves.length > 0 ? leaves : members);
+    const newestMember = newest(members);
+    // Usually the newest leaf is the desired continuation. If an ancestor was
+    // explicitly resumed after its children, its later activity wins.
+    const defaultSession = sessionTimestamp(newestMember) > sessionTimestamp(newestLeaf)
+      ? newestMember
+      : newestLeaf;
+    const roots = members.filter(member => !memberIds.has(parentById.get(member.sessionId)));
+    const root = sessionById.get(familyId) || roots[0] || members[0];
+
+    families.push({
+      familyId,
+      root,
+      members,
+      childrenById,
+      defaultSession,
+      lastTs: defaultSession.lastTs || defaultSession.firstTs,
+      hasForks: members.length > 1,
+      representativeInputIndex: inputIndex.get(defaultSession.sessionId) || 0,
+    });
+  }
+
+  // The caller pre-sorts sessions for the active sort mode. Rank each family
+  // by the same session its collapsed row displays and resumes.
+  families.sort((a, b) => a.representativeInputIndex - b.representativeInputIndex
+    || sessionTimestamp(b.defaultSession) - sessionTimestamp(a.defaultSession)
+    || a.familyId.localeCompare(b.familyId));
+  return families;
+}
+
+function buildVisibleSessionRows(families, expandedFamilyIds = new Set()) {
+  const rows = [];
+  for (const family of families) {
+    if (!family.hasForks) {
+      rows.push({
+        kind: 'session',
+        key: `session:${family.defaultSession.sessionId}`,
+        family,
+        session: family.defaultSession,
+        depth: 0,
+        treePrefix: '',
+        isDefault: true,
+      });
+      continue;
+    }
+
+    const isExpanded = expandedFamilyIds.has(family.familyId);
+    rows.push({
+      kind: 'family',
+      key: `family:${family.familyId}`,
+      family,
+      session: family.defaultSession,
+      depth: 0,
+      treePrefix: '',
+      isExpanded,
+      isDefault: true,
+    });
+    if (!isExpanded) continue;
+
+    const visited = new Set();
+    function appendMember(member, ancestorHasNext = [], isLast = true) {
+      if (!member || visited.has(member.sessionId)) return;
+      visited.add(member.sessionId);
+      const treePrefix = ancestorHasNext.map(hasNext => (hasNext ? '│  ' : '   ')).join('')
+        + (isLast ? '└─ ' : '├─ ');
+      rows.push({
+        kind: 'session',
+        key: `session:${member.sessionId}`,
+        family,
+        session: member,
+        depth: ancestorHasNext.length + 1,
+        treePrefix,
+        isDefault: member === family.defaultSession,
+        isRoot: member === family.root,
+      });
+      const children = family.childrenById.get(member.sessionId) || [];
+      children.forEach((child, index) => {
+        appendMember(child, [...ancestorHasNext, !isLast], index === children.length - 1);
+      });
+    }
+
+    appendMember(family.root, [], true);
+    // Broken or cyclic input should remain accessible even if it cannot be
+    // reached from the selected root.
+    for (const member of family.members) {
+      if (!visited.has(member.sessionId)) appendMember(member, [], true);
+    }
+  }
+  return rows;
 }
 
 // ─── Formatting Helpers ──────────────────────────────────────────────────────
@@ -686,8 +942,11 @@ function createApp() {
     }
   }
 
-  let filteredSessions = [...allSessions];
-  let selectedIndex = -1;  // -1 = "New Session", 0+ = session index
+  const expandedFamilyIds = new Set();
+  let allFamilies = buildSessionFamilies(allSessions);
+  let filteredFamilies = [...allFamilies];
+  let displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+  let selectedIndex = -1;  // -1 = "New Session", 0+ = display row index
   let filterText = '';
   let projectFilter = '';
   let isSearchMode = false;
@@ -723,7 +982,7 @@ function createApp() {
 
   function updateHeader() {
     const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`;
-    const count = `{#a3e635-fg}${filteredSessions.length}{/}{#8a8178-fg}/${allSessions.length} sessions{/}`;
+    const count = `{#a3e635-fg}${filteredFamilies.length}{/}{#8a8178-fg}/${allFamilies.length} conversations · ${allSessions.length} versions{/}`;
     const proj = `{#ffd166-fg}${uniqueProjects.length}{/}{#8a8178-fg} projects{/}`;
     const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
     const launchMode = `{#ff5d73-fg}[${getLaunchMode(launchModeId).label}]{/}`;
@@ -795,6 +1054,7 @@ function createApp() {
     const keys = [
         '{#a3e635-fg}{bold}n{/} {#a3e635-fg}New{/}',
         '{#ff7a1a-fg}{bold}↵{/} {#ff7a1a-fg}Resume{/}',
+        '{#ffd166-fg}{bold}←→/hl{/} {#ffd166-fg}Fold{/}',
         '{#ff5d73-fg}{bold}d{/} {#ff5d73-fg}Danger{/}',
         '{#ff5d73-fg}{bold}m{/} {#ff5d73-fg}Mode{/}',
         '{#ffb347-fg}{bold}/{/} {#ffb347-fg}Search{/}',
@@ -812,7 +1072,8 @@ function createApp() {
   function buildListItems() {
     const listW = Math.floor((screen.width || 100) / 2) - 2;
 
-    return filteredSessions.map((session) => {
+    return displayRows.map((row) => {
+      const session = row.session;
       const color = getProjectColor(session.project, projectColorMap);
       const proj = `{${color}-fg}${session.project.substring(0, 14).padEnd(14)}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(18)}{/}`;
@@ -852,31 +1113,57 @@ function createApp() {
   function refreshList() {
     const listW = Math.floor((screen.width || 100) / 2) - 2;
 
-    const sessionItems = filteredSessions.map((session) => {
+    const sessionItems = displayRows.map((row) => {
+      const session = row.session;
       const color = getProjectColor(session.project, projectColorMap);
-      const proj = `{${color}-fg}${session.project.substring(0, 12).padEnd(12)}{/}`;
+      const marker = row.kind === 'family'
+        ? (row.isExpanded ? '▾ ' : '▸ ')
+        : (row.treePrefix || '  ');
+      const markerWidth = row.treePrefix ? row.treePrefix.length : 2;
+      const familyBadge = row.kind === 'family'
+        ? `{#ffd166-fg}[${row.family.members.length}] → Latest{/} {#a3e635-fg}●{/} `
+        : '';
+      const familyBadgeWidth = row.kind === 'family'
+        ? `[${row.family.members.length}] → Latest ● `.length
+        : 0;
+      const compactFamily = row.kind === 'family' && listW < 60;
+      const projectWidth = Math.max(7, 12 - Math.max(0, markerWidth - 2));
+      const proj = `{${color}-fg}${session.project.substring(0, projectWidth).padEnd(projectWidth)}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
 
-      const fixedLen = 12 + 1 + 16 + 1 + 3;
-      const topicMaxLen = Math.max(10, listW - fixedLen);
+      const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
+      const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
+      const topicMaxLen = Math.max(0, listW - fixedLen);
       let topic = session.customTitle || session.topic;
 
-      if (topic.length > topicMaxLen) topic = topic.substring(0, topicMaxLen) + '…';
+      if (topic.length > topicMaxLen) {
+        topic = topicMaxLen > 1 ? topic.substring(0, topicMaxLen - 1) + '…' : '';
+      }
 
-      let label = `${proj} ${time} `;
+      const versionLabel = row.kind === 'session' && row.family.hasForks
+        ? (row.isRoot ? '{#8a8178-fg}Original{/} ' : '{#8a8178-fg}Fork{/} ')
+        : '';
+      const latest = row.kind === 'session' && row.family.hasForks && row.isDefault
+        ? ' {#a3e635-fg}●{/}'
+        : '';
+      const metadata = compactFamily ? '' : `${proj} ${time} `;
+      let label = `{#8a8178-fg}${marker}{/}${familyBadge}${metadata}${versionLabel}`;
       if (session.customTitle) {
         label += `{#5bd1b9-fg}{bold}${esc(topic)}{/}`;
       } else {
         label += `{#e7dccf-fg}${esc(topic)}{/}`;
       }
+      label += latest;
 
       return label;
     });
 
     const items = [NEW_SESSION_LABEL, ...sessionItems];
 
+    suppressSelectEvent = true;
     listPanel.setItems(items);
     listPanel.select(selectedIndex + 1);  // +1 because index 0 is "New Session"
+    suppressSelectEvent = false;
     screen.render();
   }
 
@@ -904,12 +1191,13 @@ function createApp() {
       return;
     }
 
-    if (filteredSessions.length === 0 || !filteredSessions[selectedIndex]) {
+    if (displayRows.length === 0 || !displayRows[selectedIndex]) {
       detailPanel.setContent('\n  {#8a8178-fg}No session selected{/}');
       return;
     }
 
-    const session = filteredSessions[selectedIndex];
+    const selectedRow = displayRows[selectedIndex];
+    const session = selectedRow.session;
     loadSessionDetail(session);
     const launchMode = getLaunchMode(launchModeId);
     const resumeCommand = buildCodexCommand({ sessionId: session.sessionId, modeId: launchModeId });
@@ -937,6 +1225,14 @@ function createApp() {
       ['Messages', `{#ff7a1a-fg}${session.totalMessages || session.estimatedMessages}{/}`],
       ['Size', `{#ffd166-fg}${formatFileSize(session.fileSize)}{/}`],
     ];
+    if (selectedRow.family.hasForks) {
+      const versionIndex = selectedRow.family.members.indexOf(session) + 1;
+      const familyValue = selectedRow.kind === 'family'
+        ? `${selectedRow.family.members.length} versions · Enter resumes latest`
+        : `version ${versionIndex}/${selectedRow.family.members.length}${selectedRow.isDefault ? ' · latest' : ''}`;
+      fields.splice(1, 0, ['Family', `{#ffd166-fg}${familyValue}{/}`]);
+      if (session.forkedFromId) fields.splice(2, 0, ['Forked from', `{#8a8178-fg}${session.forkedFromId}{/}`]);
+    }
     if (session.gitBranch) fields.push(['Branch', `{#5bd1b9-fg} ${session.gitBranch}{/}`]);
     if (session.version) fields.push(['Codex', `{#8a8178-fg}v${session.version}{/}`]);
     if (session.cwd) fields.push(['Directory', `{#8a8178-fg}${session.cwd}{/}`]);
@@ -999,30 +1295,43 @@ function createApp() {
 
   // ─── Filter ────────────────────────────────────────────────────────────
   function applyFilter(options = {}) {
-    const hadFilteredResults = filteredSessions.length > 0;
+    const hadFilteredResults = displayRows.length > 0;
     const previousChildBase = listPanel.childBase;
-    const selectedSession = options.preserveSelection && selectedIndex >= 0
-      ? filteredSessions[selectedIndex]
+    const selectedRowKey = options.preserveSelection && selectedIndex >= 0
+        && displayRows[selectedIndex]
+      ? displayRows[selectedIndex].key
       : null;
-    filteredSessions = filterSessionList(allSessions, filterText, projectFilter);
-    if (selectedSession && filteredSessions.includes(selectedSession)) {
-      selectedIndex = filteredSessions.indexOf(selectedSession);
+    const matchingSessions = filterSessionList(allSessions, filterText, projectFilter);
+    const matchingIds = new Set(matchingSessions.map(session => session.sessionId));
+    allFamilies = buildSessionFamilies(allSessions);
+    // Product decision: matching any version includes its family, while the
+    // collapsed family row always stays pinned to Latest. Expand it to resume
+    // the exact historical version that matched.
+    filteredFamilies = allFamilies.filter(family => (
+      family.members.some(member => matchingIds.has(member.sessionId))
+    ));
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    const preservedIndex = selectedRowKey
+      ? displayRows.findIndex(row => row.key === selectedRowKey)
+      : -1;
+    if (preservedIndex !== -1) {
+      selectedIndex = preservedIndex;
     } else {
-      selectedIndex = Math.min(selectedIndex, Math.max(-1, filteredSessions.length - 1));
+      selectedIndex = Math.min(selectedIndex, Math.max(-1, displayRows.length - 1));
     }
     // User-driven filtering selects the first result. Background refreshes
     // preserve the current session so completion cannot move the highlight.
-    if (!options.preserveSelection && (filterText || projectFilter) && filteredSessions.length > 0) {
+    if (!options.preserveSelection && (filterText || projectFilter) && displayRows.length > 0) {
       selectedIndex = 0;
     } else if (options.preserveSelection && !hadFilteredResults
-        && (filterText || projectFilter) && filteredSessions.length > 0) {
+        && (filterText || projectFilter) && displayRows.length > 0) {
       // If indexing produced the first match for an active query, move off the
       // New Conversation row so Enter resumes the newly visible result.
       selectedIndex = 0;
     }
     if (options.preserveSelection) {
       const visibleRows = Math.max(1, listPanel.height || 1);
-      const maxBase = Math.max(0, filteredSessions.length + 1 - visibleRows);
+      const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
       const selectedRow = selectedIndex + 1;
       let nextBase = Math.min(previousChildBase, maxBase);
       if (selectedRow < nextBase) nextBase = selectedRow;
@@ -1134,8 +1443,8 @@ function createApp() {
 
   function moveSelection(delta) {
     const newIdx = selectedIndex + delta;
-    // -1 = New Session, 0..length-1 = sessions
-    if (newIdx >= -1 && newIdx < filteredSessions.length) {
+    // -1 = New Session, 0..length-1 = visible conversation rows
+    if (newIdx >= -1 && newIdx < displayRows.length) {
       selectedIndex = newIdx;
       const listIdx = selectedIndex + 1;  // list index (0 = New Session row)
       suppressSelectEvent = true;
@@ -1167,6 +1476,36 @@ function createApp() {
     if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
     moveSelection(-1);
   });
+  function expandSelectedFamily() {
+    if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
+    const row = displayRows[selectedIndex];
+    if (!row || row.kind !== 'family' || row.isExpanded) return;
+    expandedFamilyIds.add(row.family.familyId);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    selectedIndex = displayRows.findIndex(candidate => candidate.key === row.key);
+    renderAll();
+  }
+  function collapseSelectedFamily() {
+    if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
+    const row = displayRows[selectedIndex];
+    if (!row || !row.family.hasForks || !expandedFamilyIds.has(row.family.familyId)) return;
+    const familyKey = `family:${row.family.familyId}`;
+    expandedFamilyIds.delete(row.family.familyId);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    selectedIndex = displayRows.findIndex(candidate => candidate.key === familyKey);
+    const visibleRows = Math.max(1, listPanel.height || 1);
+    const selectedListIndex = selectedIndex + 1;
+    const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
+    let nextBase = Math.min(listPanel.childBase, maxBase);
+    if (selectedListIndex < nextBase) nextBase = selectedListIndex;
+    if (selectedListIndex >= nextBase + visibleRows) {
+      nextBase = selectedListIndex - visibleRows + 1;
+    }
+    listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+    renderAll();
+  }
+  screen.key(['right'], expandSelectedFamily);
+  screen.key(['left'], collapseSelectedFamily);
   screen.key(['home'], () => {
     if (renameMode || popupOpen) return;
     if (isSearchMode) { isSearchMode = false; }
@@ -1178,7 +1517,7 @@ function createApp() {
   screen.key(['end'], () => {
     if (renameMode || popupOpen) return;
     if (isSearchMode) { isSearchMode = false; }
-    selectedIndex = Math.max(0, filteredSessions.length - 1);
+    selectedIndex = displayRows.length > 0 ? displayRows.length - 1 : -1;
     suppressSelectEvent = true; listPanel.select(selectedIndex + 1); suppressSelectEvent = false;
     listPanel.childBase = Math.max(0, selectedIndex + 1 - listPanel.height + 1);
     renderDetail(); updateHeader(); screen.render();
@@ -1267,8 +1606,10 @@ function createApp() {
     if (!isSearchMode && !popupOpen) {
       if (ch === 'j') { moveSelection(1); return; }
       if (ch === 'k') { moveSelection(-1); return; }
+      if (ch === 'l') { expandSelectedFamily(); return; }
+      if (ch === 'h') { collapseSelectedFamily(); return; }
       if (ch === 'G') {
-        selectedIndex = Math.max(0, filteredSessions.length - 1);
+        selectedIndex = displayRows.length > 0 ? displayRows.length - 1 : -1;
         suppressSelectEvent = true; listPanel.select(selectedIndex + 1); suppressSelectEvent = false;
         listPanel.childBase = Math.max(0, selectedIndex + 1 - listPanel.height + 1);
         renderDetail(); updateHeader(); screen.render();
@@ -1364,8 +1705,8 @@ function createApp() {
     if (isSearchMode) { isSearchMode = false; renderAll(); return; }
     if (popupOpen) return;
     if (selectedIndex === -1) { startNewSession(); return; }
-    if (filteredSessions.length === 0) return;
-    resumeSession(filteredSessions[selectedIndex]);
+    if (displayRows.length === 0 || selectedIndex < 0) return;
+    resumeSession(displayRows[selectedIndex].session);
   });
 
   // Quick shortcut: n = new session
@@ -1377,8 +1718,8 @@ function createApp() {
   // Copy session ID
   screen.key(['c'], () => {
     if (renameMode || isSearchMode) return;
-    if (filteredSessions.length === 0) return;
-    const sid = filteredSessions[selectedIndex].sessionId;
+    if (displayRows.length === 0 || selectedIndex < 0) return;
+    const sid = displayRows[selectedIndex].session.sessionId;
     try {
       if (!copyToClipboard(sid)) throw new Error('clipboard unavailable');
       footer.setContent(`\n  {#a3e635-fg}{bold}✓ Copied:{/} {#5ad1e6-fg}${sid}{/}`);
@@ -1395,8 +1736,8 @@ function createApp() {
   screen.key(['d'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
     if (selectedIndex === -1) { startNewSession('danger'); return; }
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    resumeSession(filteredSessions[selectedIndex], 'danger');
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    resumeSession(displayRows[selectedIndex].session, 'danger');
   });
 
   // ─── Delete Session ───────────────────────────────────────────────────
@@ -1414,11 +1755,10 @@ function createApp() {
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
-      const filtIdx = filteredSessions.indexOf(session);
-      if (filtIdx !== -1) filteredSessions.splice(filtIdx, 1);
-      // Adjust selection
-      if (selectedIndex >= filteredSessions.length) {
-        selectedIndex = Math.max(-1, filteredSessions.length - 1);
+      // Adjust selection. Family and visible-row state is rebuilt by the
+      // caller so deleting one version can reveal a singleton family.
+      if (selectedIndex >= displayRows.length) {
+        selectedIndex = Math.max(-1, displayRows.length - 1);
       }
     } catch (e) { /* silently fail */ }
   }
@@ -1461,8 +1801,15 @@ function createApp() {
 
   screen.key(['x', 'delete'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    showDeleteConfirm(filteredSessions[selectedIndex]);
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    const row = displayRows[selectedIndex];
+    if (row.kind === 'family') {
+      footer.setContent('\n  {#ffd166-fg}{bold}Expand this conversation first{/}{#8a8178-fg} to choose a version to delete{/}');
+      screen.render();
+      setTimeout(() => { updateFooter(); screen.render(); }, 1800);
+      return;
+    }
+    showDeleteConfirm(row.session);
   });
 
   // ─── Rename Session ───────────────────────────────────────────────────
@@ -1585,8 +1932,8 @@ function createApp() {
 
   screen.key(['r'], () => {
     if (isSearchMode || popupOpen) return;
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    showRenameInput(filteredSessions[selectedIndex]);
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    showRenameInput(displayRows[selectedIndex].session);
   });
 
   screen.key(['m'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleLaunchMode(); });
@@ -1691,6 +2038,8 @@ if (typeof module !== 'undefined') {
     isInteractiveSession,
     loadAllSessions,
     filterSessionList,
+    buildSessionFamilies,
+    buildVisibleSessionRows,
     // Formatting
     formatTimestamp,
     formatFileSize,
@@ -1785,7 +2134,8 @@ Usage:
   codex-starter --help       Show this help
 
 TUI Keyboard Shortcuts:
-  ↑/↓           Navigate sessions
+  ↑/↓ or j/k    Navigate sessions
+  ←/→ or h/l    Collapse / expand a fork family
   Enter         Start new / resume selected session
   n             Start new session
   m             Cycle launch mode (default/full-auto/danger, remembered)

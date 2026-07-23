@@ -96,6 +96,69 @@ writeSession('rollout-b.jsonl', [
   },
 ]);
 
+writeSession('rollout-a-fork.jsonl', [
+  {
+    timestamp: '2026-04-13T03:00:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: 'sess-a-fork',
+      forked_from_id: 'sess-a',
+      timestamp: '2026-04-13T03:00:00.000Z',
+      cwd: '/Users/test/Desktop/project-alpha',
+      source: 'cli',
+      originator: 'codex-tui',
+    },
+  },
+  {
+    timestamp: '2026-04-13T02:47:46.375Z',
+    type: 'session_meta',
+    payload: {
+      id: 'sess-a',
+      timestamp: '2026-04-13T02:47:46.375Z',
+      cwd: '/Users/test/Desktop/project-alpha',
+      source: 'cli',
+      originator: 'codex-tui',
+    },
+  },
+  {
+    timestamp: '2026-04-13T03:01:00.000Z',
+    type: 'event_msg',
+    payload: { type: 'user_message', message: 'build project filter UI' },
+  },
+]);
+
+writeSession('rollout-a-fork-latest.jsonl', [
+  {
+    timestamp: '2026-04-13T04:00:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: 'sess-a-fork-latest',
+      forked_from_id: 'sess-a-fork',
+      timestamp: '2026-04-13T04:00:00.000Z',
+      cwd: '/Users/test/Desktop/project-alpha',
+      source: 'cli',
+      originator: 'codex-tui',
+    },
+  },
+  {
+    timestamp: '2026-04-13T03:00:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: 'sess-a-fork',
+      forked_from_id: 'sess-a',
+      timestamp: '2026-04-13T03:00:00.000Z',
+      cwd: '/Users/test/Desktop/project-alpha',
+      source: 'cli',
+      originator: 'codex-tui',
+    },
+  },
+  {
+    timestamp: '2026-04-13T04:01:00.000Z',
+    type: 'event_msg',
+    payload: { type: 'user_message', message: 'build project filter UI' },
+  },
+]);
+
 fs.writeFileSync(path.join(codeXDir, 'codex-starter-meta.json'), JSON.stringify({
   sessions: {
     'sess-a': { customTitle: 'build project filter UI — renamed-dashboard-marker' },
@@ -123,7 +186,14 @@ function createMockWidget(label, opts = {}) {
   widget.style = opts.style || {};
   widget.setContent = function(content) { this._content = content; };
   widget.getContent = function() { return this._content; };
-  widget.setItems = function(items) { this._items = [...items]; this.items = [...items]; };
+  widget.setItems = function(items) {
+    this._items = [...items];
+    this.items = [...items];
+    // Blessed may emit while replacing list contents; the app must suppress
+    // this internal selection event while rebuilding fork rows.
+    const index = Math.max(0, Math.min(this._selectedIndex, this.items.length - 1));
+    this.emit('select item', this.items[index], index);
+  };
   widget.select = function(index) { this._selectedIndex = index; };
   widget.focus = function() {};
   widget.destroy = function() { this._destroyed = true; };
@@ -239,8 +309,53 @@ after(() => {
 describe('codex starter tui', () => {
   it('renders Codex Starter header and list items', () => {
     assert.match(widgets.header.getContent(), /Codex Starter/);
-    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    assert.match(widgets.header.getContent(), /conversations · 3 versions/);
+    assert.ok(widgets.list.items.some(item => item.includes('build proj')));
+    assert.ok(widgets.list.items.some(item => item.includes('▸')));
+    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
+  });
+
+  it('expands and collapses fork families with arrow keys', () => {
+    triggerKeypress(null, 'escape');
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    assert.equal(widgets.list.items.length, 2, 'new row plus one collapsed family');
+
+    triggerScreenKey('right');
+    assert.equal(widgets.list.items.length, 5, 'family row plus all three versions');
+    assert.ok(widgets.list.items.some(item => item.includes('Original')));
+    assert.equal(widgets.list.items.filter(item => item.includes('Fork')).length, 2);
+
+    triggerScreenKey('down');
+    widgets.list.childBase = 3;
+    triggerScreenKey('left');
+    assert.equal(widgets.list.items.length, 2);
+    assert.equal(widgets.list.childBase, 0);
+    assert.ok(widgets.list.items.some(item => item.includes('▸')));
+  });
+
+  it('expands and collapses fork families with Vim keys', () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+
+    triggerKeypress('l');
+    assert.equal(widgets.list.items.length, 5, 'l expands the selected family');
+
+    triggerKeypress('j');
+    triggerKeypress('h');
+    assert.equal(widgets.list.items.length, 2, 'h collapses from a child version');
+    assert.ok(widgets.list.items.some(item => item.includes('▸')));
+  });
+
+  it('resumes an explicitly selected expanded version', () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('right');
+    triggerScreenKey('down');
+    triggerScreenKey('enter');
+    assert.match(spawnCalls.at(-1).args.at(-1), /resume sess-a(?:\s|$)/);
+    triggerScreenKey('left');
   });
 
   it('expands the conversation preview for taller detail panes', () => {
@@ -248,7 +363,10 @@ describe('codex starter tui', () => {
     widgets.detail.height = 80;
     triggerScreenKey('home');
     triggerScreenKey('down');
+    triggerScreenKey('right');
+    triggerScreenKey('down');
     assert.match(widgets.detail.getContent(), /extra prompt 11/);
+    triggerScreenKey('left');
   });
 
   it('supports search via slash mode', () => {
@@ -260,31 +378,37 @@ describe('codex starter tui', () => {
     triggerKeypress('e');
     triggerKeypress('r');
     assert.ok(widgets.header.getContent().includes('/ filter'));
-    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
   });
 
   it('searches final answers but not commentary or tool output', () => {
     triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'release-summary-marker') triggerKeypress(ch);
-    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
 
     triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'tool-only-marker') triggerKeypress(ch);
-    assert.ok(!widgets.list.items.some(item => item.includes('build project filter UI')));
+    assert.ok(!widgets.list.items.some(item => item.includes('→ Latest')));
+    triggerScreenKey('end');
+    assert.equal(widgets.list._selectedIndex, 0);
+    triggerKeypress('G');
+    assert.equal(widgets.list._selectedIndex, 0);
     triggerKeypress(null, 'escape');
   });
 
   it('searches locally renamed session titles', () => {
     triggerScreenKey('/');
     for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
-    assert.ok(widgets.list.items.some(item => item.includes('build project filter UI')));
+    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
     triggerKeypress(null, 'escape');
   });
 
   it('persists clearing a renamed session title', async () => {
     triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('right');
     triggerScreenKey('down');
     triggerScreenKey('r');
     for (let i = 0; i < 80; i++) triggerKeypress(null, 'backspace');
@@ -298,6 +422,7 @@ describe('codex starter tui', () => {
 
     await new Promise(resolve => setTimeout(resolve, 220));
     triggerWidgetKey(widgets.renameConfirm, 'escape');
+    triggerScreenKey('left');
   });
 
   it('keeps the project filter when Escape clears a text search', () => {
@@ -350,6 +475,7 @@ describe('codex starter tui', () => {
     assert.ok(lastCall.cmd.endsWith('sh') || lastCall.cmd.endsWith('zsh') || lastCall.cmd.endsWith('bash'));
     assert.ok(lastCall.args.includes('-ic'));
     assert.ok(lastCall.args.at(-1).includes('codex --full-auto resume'));
+    assert.ok(lastCall.args.at(-1).includes('sess-a-fork-latest'));
   });
 
   it('starts dangerous mode from new session row', () => {
