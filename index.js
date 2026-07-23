@@ -1257,53 +1257,96 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let currentMetaContent = '';
   let currentMessagesContent = '';
   let currentActionContent = '';
-
-  function renderedLineCount(panel, content) {
-    if (!content) return 0;
-    panel.parseContent();
-    return panel.getScreenLines().length;
-  }
+  let detailUsesUnifiedScroll = false;
+  let unifiedMetaHeight = 0;
+  let currentDetailKey = null;
 
   function layoutDetailPanels() {
+    detailMetaPanel.parseContent();
+    detailActionPanel.parseContent();
+
+    const requestedMetaHeight = currentMetaContent
+      ? detailMetaPanel.getScreenLines().length
+      : 0;
+    const requestedActionHeight = currentActionContent
+      ? detailActionPanel.getScreenLines().length
+      : 0;
+    const previousMessagesContent = detailMessagesPanel.content;
+    const previousMessageBase = detailMessagesPanel.childBase || 0;
+    const previousMessageOffset = detailMessagesPanel.childOffset || 0;
+    detailMessagesPanel.setContent(currentMetaContent);
+    const requestedUnifiedMetaHeight = currentMetaContent
+      ? detailMessagesPanel.getScreenLines().length
+      : 0;
+    detailMessagesPanel.setContent(previousMessagesContent);
+    detailMessagesPanel.childBase = previousMessageBase;
+    detailMessagesPanel.childOffset = previousMessageOffset;
+
     const availableHeight = Math.max(
       1,
       Number(detailPanel.height) || Math.max(1, (screen.height || 24) - 7),
     );
-    const requestedMetaHeight = renderedLineCount(detailMetaPanel, currentMetaContent);
-    const requestedActionHeight = renderedLineCount(detailActionPanel, currentActionContent);
-    const actionHeight = Math.min(requestedActionHeight, Math.max(0, availableHeight - 1));
-    const metaHeight = Math.min(
-      requestedMetaHeight,
-      Math.max(0, availableHeight - actionHeight - 1),
-    );
-    const messagesHeight = Math.max(1, availableHeight - metaHeight - actionHeight);
+    const useUnifiedScroll = requestedMetaHeight + requestedActionHeight + 1 > availableHeight;
+    const messagesContent = useUnifiedScroll
+      ? [currentMetaContent, currentMessagesContent, currentActionContent].filter(Boolean).join('\n')
+      : currentMessagesContent;
 
-    detailMetaPanel.height = metaHeight;
-    detailMessagesPanel.top = metaHeight;
-    detailMessagesPanel.bottom = actionHeight;
-    detailActionPanel.height = actionHeight;
+    const messagesChanged = detailMessagesPanel.content !== messagesContent;
+    let nextMessageBase = previousMessageBase;
+    if (messagesChanged) detailMessagesPanel.setContent(messagesContent);
 
-    // Resizing can make a previously valid childBase too large. Blessed only
-    // clamps when the target offset changes, so calculate the new maximum and
-    // explicitly move back inside it.
+    if (useUnifiedScroll !== detailUsesUnifiedScroll) {
+      nextMessageBase += useUnifiedScroll ? requestedUnifiedMetaHeight : -unifiedMetaHeight;
+    } else if (useUnifiedScroll) {
+      nextMessageBase += requestedUnifiedMetaHeight - unifiedMetaHeight;
+    } else if (messagesChanged) {
+      nextMessageBase = 0;
+    }
+
+    detailMessagesPanel.childBase = nextMessageBase;
+    detailMessagesPanel.childOffset = 0;
+    detailUsesUnifiedScroll = useUnifiedScroll;
+    unifiedMetaHeight = useUnifiedScroll ? requestedUnifiedMetaHeight : 0;
+
+    if (useUnifiedScroll) {
+      detailMetaPanel.height = 0;
+      detailMessagesPanel.top = 0;
+      detailMessagesPanel.bottom = 0;
+      detailActionPanel.height = 0;
+    } else {
+      detailMetaPanel.height = requestedMetaHeight;
+      detailMessagesPanel.top = requestedMetaHeight;
+      detailMessagesPanel.bottom = requestedActionHeight;
+      detailActionPanel.height = requestedActionHeight;
+    }
+
+    // childBase is the actual rendered viewport. getScroll()/setScroll() also
+    // include childOffset and are not idempotent when alwaysScroll is enabled.
     detailMessagesPanel.parseContent();
-    const maxScroll = Math.max(
+    const visibleMessages = useUnifiedScroll
+      ? availableHeight
+      : availableHeight - requestedMetaHeight - requestedActionHeight;
+    const maxMessageBase = Math.max(
       0,
-      detailMessagesPanel.getScreenLines().length - messagesHeight,
+      detailMessagesPanel.getScreenLines().length - visibleMessages,
     );
-    const currentScroll = detailMessagesPanel.getScroll();
-    if (currentScroll > maxScroll) detailMessagesPanel.setScroll(maxScroll);
+    detailMessagesPanel.childBase = Math.max(
+      0,
+      Math.min(detailMessagesPanel.childBase || 0, maxMessageBase),
+    );
+    detailMessagesPanel.childOffset = 0;
   }
 
-  function setDetailContent(metaContent, messagesContent, actionContent) {
+  function setDetailContent(metaContent, messagesContent, actionContent, detailKey = null) {
+    const detailChanged = detailKey !== currentDetailKey;
     currentMetaContent = metaContent;
     currentMessagesContent = messagesContent;
     currentActionContent = actionContent;
     detailMetaPanel.setContent(metaContent);
-    detailMessagesPanel.setContent(messagesContent);
     detailActionPanel.setContent(actionContent);
     layoutDetailPanels();
-    detailMessagesPanel.setScroll(0);
+    if (detailChanged) detailMessagesPanel.setScroll(0);
+    currentDetailKey = detailKey;
   }
 
   screen.on('resize', () => {
@@ -1328,12 +1371,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const actionContent = `${sep}`
         + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}`
         + `\n {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}`;
-      setDetailContent(metaContent, messagesContent, actionContent);
+      setDetailContent(metaContent, messagesContent, actionContent, 'new-session');
       return;
     }
 
     if (displayRows.length === 0 || !displayRows[selectedIndex]) {
-      setDetailContent('', '\n  {#8a8178-fg}No session selected{/}', '');
+      setDetailContent('', '\n  {#8a8178-fg}No session selected{/}', '', 'no-selection');
       return;
     }
 
@@ -1421,7 +1464,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       + `\n {#8a8178-fg}${resumeCommand}{/}`
       + `\n {#8a8178-fg}${launchMode.description}{/}`;
 
-    setDetailContent(metaContent, messagesContent, actionContent);
+    setDetailContent(metaContent, messagesContent, actionContent, session.sessionId);
   }
 
   // ─── Render All ────────────────────────────────────────────────────────
