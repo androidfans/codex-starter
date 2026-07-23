@@ -26,6 +26,7 @@ const {
   buildVisibleSessionRows,
   getFamilyTitleForRow,
   rowTargetsFamilyTitle,
+  reconcileFamilyMetaAfterDelete,
   formatTimestamp,
   formatFileSize,
   loadMeta,
@@ -630,6 +631,29 @@ describe('fork families', () => {
     row.family.hasForks = true;
     assert.equal(getFamilyTitleForRow(meta, row), '');
     assert.equal(rowTargetsFamilyTitle(meta, row), false);
+  });
+
+  it('moves and removes family metadata as ancestor versions are deleted', () => {
+    const root = session('root', '', '2026-04-13T01:00:00.000Z');
+    const middle = session('middle', 'root', '2026-04-13T02:00:00.000Z');
+    const leaf = session('leaf', 'middle', '2026-04-13T03:00:00.000Z');
+    const meta = { families: { root: { customTitle: 'stable family title' } } };
+
+    let sessions = [root, middle, leaf];
+    let family = buildSessionFamilies(sessions)[0];
+    sessions = [middle, leaf];
+    reconcileFamilyMetaAfterDelete(meta, family, sessions);
+    assert.equal(meta.families.root.customTitle, 'stable family title');
+
+    family = buildSessionFamilies(sessions)[0];
+    sessions = [leaf];
+    reconcileFamilyMetaAfterDelete(meta, family, sessions);
+    assert.equal(meta.families.middle.customTitle, 'stable family title');
+    assert.equal(meta.families.root, undefined);
+
+    family = buildSessionFamilies(sessions)[0];
+    reconcileFamilyMetaAfterDelete(meta, family, []);
+    assert.equal(meta.families, undefined);
   });
 
   it('aggregates linear and parallel forks and chooses the newest leaf', () => {

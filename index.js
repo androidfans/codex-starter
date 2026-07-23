@@ -163,6 +163,26 @@ function rowTargetsFamilyTitle(meta, row) {
   ));
 }
 
+function reconcileFamilyMetaAfterDelete(meta, deletedFamily, remainingSessions) {
+  if (!deletedFamily || !meta.families || !meta.families[deletedFamily.familyId]) return;
+
+  const oldFamilyId = deletedFamily.familyId;
+  const familyMeta = meta.families[oldFamilyId];
+  const remainingIds = new Set(remainingSessions.map(session => session.sessionId));
+  const survivingMemberIds = new Set(deletedFamily.members
+    .map(member => member.sessionId)
+    .filter(sessionId => remainingIds.has(sessionId)));
+  const replacementFamilyIds = buildSessionFamilies(remainingSessions)
+    .filter(family => family.members.some(member => survivingMemberIds.has(member.sessionId)))
+    .map(family => family.familyId);
+
+  for (const familyId of replacementFamilyIds) {
+    if (familyId !== oldFamilyId) meta.families[familyId] = { ...familyMeta };
+  }
+  if (!replacementFamilyIds.includes(oldFamilyId)) delete meta.families[oldFamilyId];
+  if (Object.keys(meta.families).length === 0) delete meta.families;
+}
+
 // ─── Data Layer ──────────────────────────────────────────────────────────────
 
 function getProjectDisplayName(cwd) {
@@ -1954,6 +1974,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   // ─── Delete Session ───────────────────────────────────────────────────
   function deleteSession(session) {
     try {
+      const deletedFamily = buildSessionFamilies(allSessions)
+        .find(family => family.members.some(member => member.sessionId === session.sessionId));
       // Delete the .jsonl file
       if (fs.existsSync(session.filePath)) {
         fs.unlinkSync(session.filePath);
@@ -1961,11 +1983,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       // Clean up meta entry
       if (meta.sessions[session.sessionId]) {
         delete meta.sessions[session.sessionId];
-        saveMeta(meta);
       }
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
+      reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
+      saveMeta(meta);
       // Adjust selection. Family and visible-row state is rebuilt by the
       // caller so deleting one version can reveal a singleton family.
       if (selectedIndex >= displayRows.length) {
@@ -2273,6 +2296,7 @@ if (typeof module !== 'undefined') {
     buildVisibleSessionRows,
     getFamilyTitleForRow,
     rowTargetsFamilyTitle,
+    reconcileFamilyMetaAfterDelete,
     // Formatting
     formatTimestamp,
     formatFileSize,
