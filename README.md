@@ -64,6 +64,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 - Explicit launch mode selector with `m`, persisted locally
 - Project filter with `p`
 - Fork families collapsed into one row, with Finder-style expansion
+- Automatically switches macOS to the ABC input source when the TUI starts
 - Resume selected session with `Enter`
 - Rename selected session with `r`
 - Delete selected session with `x`

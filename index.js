@@ -32,6 +32,7 @@ function detectCLI() {
   return { name: 'codex', cmd: 'codex' };
 }
 const CLI = detectCLI();
+const ABC_INPUT_SOURCE_ID = 'com.apple.keylayout.ABC';
 
 function getShellCommand(command) {
   const shellPath = process.env.SHELL || '/bin/sh';
@@ -65,6 +66,36 @@ function buildCodexCommand({ sessionId, modeId }) {
   const parts = [CLI.cmd, ...mode.args];
   if (sessionId) parts.push('resume', sessionId);
   return parts.join(' ');
+}
+
+function switchToAbcInputSource(platform = process.platform, runCommand = spawnSync) {
+  if (platform !== 'darwin') return false;
+
+  const options = { stdio: 'ignore', timeout: 1000 };
+  try {
+    const macism = runCommand('macism', [ABC_INPUT_SOURCE_ID], options);
+    if (!macism.error && macism.status === 0) return true;
+  } catch (_) { /* try the built-in macOS fallback */ }
+
+  // macism is optional. JXA can call the same Carbon input-source API using
+  // only tools included with macOS and does not require Accessibility access.
+  const script = [
+    'ObjC.import("Carbon");',
+    `const id = $("${ABC_INPUT_SOURCE_ID}");`,
+    'const filter = $.NSDictionary.dictionaryWithObjectForKey(id, $.kTISPropertyInputSourceID);',
+    'const sources = $.TISCreateInputSourceList(filter, false);',
+    'if ($.CFArrayGetCount(sources) === 0) throw new Error("ABC input source not found");',
+    'const source = $.CFArrayGetValueAtIndex(sources, 0);',
+    'const status = $.TISSelectInputSource(source);',
+    'if (status !== 0) throw new Error("TISSelectInputSource failed: " + status);',
+  ].join(' ');
+
+  try {
+    const fallback = runCommand('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], options);
+    return !fallback.error && fallback.status === 0;
+  } catch (_) {
+    return false;
+  }
 }
 
 // ─── Color Palette (Ember Terminal) ──────────────────────────────────────────
@@ -2062,6 +2093,7 @@ if (typeof module !== 'undefined') {
     getShellCommand,
     getLaunchMode,
     buildCodexCommand,
+    switchToAbcInputSource,
     // List mode (for integration tests)
     runListMode,
     // TUI (for interaction tests)
@@ -2160,5 +2192,6 @@ TUI Keyboard Shortcuts:
     process.exit(0);
   }
 
+  switchToAbcInputSource();
   createApp();
 }
