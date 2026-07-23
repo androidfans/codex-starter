@@ -183,9 +183,23 @@ function createMockWidget(label, opts = {}) {
   widget.childBase = 0;
   widget.height = 10;
   widget.width = 120;
+  widget.top = opts.top || 0;
+  widget.bottom = opts.bottom || 0;
+  widget.wrap = opts.wrap !== false;
+  widget.parent = opts.parent;
   widget.style = opts.style || {};
-  widget.setContent = function(content) { this._content = content; };
+  widget.setContent = function(content) { this._content = content; this.content = content; };
   widget.getContent = function() { return this._content; };
+  widget.parseContent = function() {};
+  widget.getScreenLines = function() {
+    if (!this._content) return [];
+    const width = Math.max(1, Number(this.width) || 1);
+    return this._content.split('\n').flatMap((line) => {
+      const plain = line.replace(/{(\/?)([\w\-,;!#]*)}/g, '');
+      const rows = this.wrap ? Math.max(1, Math.ceil([...plain].length / width)) : 1;
+      return Array.from({ length: rows }, () => plain);
+    });
+  };
   widget.setItems = function(items) {
     this._items = [...items];
     this.items = [...items];
@@ -197,8 +211,15 @@ function createMockWidget(label, opts = {}) {
   widget.select = function(index) { this._selectedIndex = index; };
   widget.focus = function() {};
   widget.destroy = function() { this._destroyed = true; };
-  widget.scroll = function(delta) { this._scrollPos += delta; };
-  widget.setScroll = function(value) { this._scrollPos = value; };
+  widget.getScroll = function() { return this._scrollPos; };
+  widget.setScroll = function(value) {
+    const visibleHeight = this.parent && this.parent !== mockScreen
+      ? this.parent.height - (Number(this.top) || 0) - (Number(this.bottom) || 0)
+      : this.height;
+    const maxScroll = Math.max(0, this.getScreenLines().length - Math.max(1, visibleHeight));
+    this._scrollPos = Math.max(0, Math.min(value, maxScroll));
+  };
+  widget.scroll = function(delta) { this.setScroll(this._scrollPos + delta); };
   widget.render = function() {};
   widget.key = function(keys, handler) {
     const list = Array.isArray(keys) ? keys : [keys];
@@ -231,7 +252,15 @@ const mockBlessed = {
     const widget = createMockWidget('box', opts);
     if (opts.parent === mockScreen && opts.top === 0) widgets.header = widget;
     if (opts.parent === mockScreen && opts.bottom === 0) widgets.footer = widget;
-    if (opts.parent === mockScreen && String(opts.left).includes('50%')) widgets.detail = widget;
+    if (opts.parent === mockScreen && String(opts.left).includes('50%')) {
+      widgets.detail = widget;
+      widget.width = Math.floor(mockScreen.width / 2) - 1;
+      widget.height = mockScreen.height - 7;
+    }
+    if (opts.parent === widgets.detail && opts.width === '100%') widget.width = widgets.detail.width;
+    if (opts.name === 'detail-meta') widgets.detailMeta = widget;
+    if (opts.name === 'detail-messages') widgets.detailMessages = widget;
+    if (opts.name === 'detail-action') widgets.detailAction = widget;
     if (String(opts.label).includes('Renamed')) widgets.renameConfirm = widget;
     return widget;
   },
@@ -288,6 +317,13 @@ function triggerKeypress(ch, keyName = ch) {
 function triggerWidgetKey(widget, keyName, ch = null) {
   const handlers = widget.__keyHandlers?.[keyName] || [];
   for (const handler of handlers) handler(ch, { name: keyName });
+}
+
+function detailText() {
+  return [widgets.detailMeta, widgets.detailMessages, widgets.detailAction]
+    .filter(Boolean)
+    .map(widget => widget.getContent())
+    .join('\n');
 }
 
 before(async () => {
@@ -377,14 +413,80 @@ describe('codex starter tui', () => {
     triggerScreenKey('left');
   });
 
-  it('expands the conversation preview for taller detail panes', () => {
+  it('shows every historical turn with one response preview per user message', () => {
     triggerKeypress(null, 'escape');
-    widgets.detail.height = 80;
     triggerScreenKey('home');
     triggerScreenKey('down');
     triggerScreenKey('right');
     triggerScreenKey('down');
-    assert.match(widgets.detail.getContent(), /extra prompt 11/);
+
+    assert.match(widgets.detailMessages.getContent(), /extra prompt 20/);
+    const userPreviewCount = (widgets.detailMessages.getContent().match(/You >/g) || []).length;
+    const codexPreviewCount = (widgets.detailMessages.getContent().match(/Codex >/g) || []).length;
+    assert.equal(userPreviewCount, 21);
+    assert.ok(codexPreviewCount <= userPreviewCount);
+    assert.match(
+      widgets.detailMessages.getContent(),
+      /On it\.\{\/\}\n\n .*You >\{\/\} extra prompt 01/,
+    );
+    triggerScreenKey('left');
+  });
+
+  it('scrolls only the middle conversation viewport', () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('right');
+    triggerScreenKey('down');
+    const metaScroll = widgets.detailMeta.getScroll();
+    const messagesScroll = widgets.detailMessages.getScroll();
+    const actionScroll = widgets.detailAction.getScroll();
+
+    widgets.detailMeta.emit('wheeldown');
+    widgets.detailMessages.emit('wheeldown');
+    widgets.detailAction.emit('wheeldown');
+
+    assert.equal(widgets.detailMeta.getScroll(), metaScroll);
+    assert.equal(widgets.detailMessages.getScroll(), messagesScroll + 2);
+    assert.equal(widgets.detailAction.getScroll(), actionScroll);
+    assert.match(widgets.detailMeta.getContent(), /Session/);
+    assert.match(widgets.detailAction.getContent(), /Enter.*resume this conversation/);
+    triggerScreenKey('left');
+  });
+
+  it('reflows fixed panels and clamps conversation scroll on resize', () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('right');
+    triggerScreenKey('down');
+
+    widgets.detail.height = 80;
+    widgets.detail.width = 39;
+    widgets.detailMeta.width = 39;
+    widgets.detailMessages.width = 39;
+    widgets.detailAction.width = 39;
+    mockScreen.emit('resize');
+    assert.ok(widgets.detailMeta.height > widgets.detailMeta.getContent().split('\n').length);
+    assert.ok(widgets.detailAction.height > 4);
+
+    widgets.detail.height = 12;
+    mockScreen.emit('resize');
+    widgets.detailMessages.setScroll(999);
+    widgets.detail.height = 80;
+    mockScreen.emit('resize');
+    const visibleHeight = widgets.detail.height
+      - widgets.detailMessages.top - widgets.detailMessages.bottom;
+    const maxScroll = Math.max(
+      0,
+      widgets.detailMessages.getScreenLines().length - visibleHeight,
+    );
+    assert.ok(widgets.detailMessages.getScroll() <= maxScroll);
+
+    widgets.detail.height = mockScreen.height - 7;
+    widgets.detail.width = Math.floor(mockScreen.width / 2) - 1;
+    widgets.detailMeta.width = widgets.detail.width;
+    widgets.detailMessages.width = widgets.detail.width;
+    widgets.detailAction.width = widgets.detail.width;
+    mockScreen.emit('resize');
     triggerScreenKey('left');
   });
 
@@ -481,7 +583,7 @@ describe('codex starter tui', () => {
     triggerScreenKey('home');
     triggerScreenKey('m');
     assert.ok(widgets.header.getContent().includes('[Full Auto]'));
-    assert.ok(widgets.detail.getContent().includes('codex --full-auto'));
+    assert.ok(detailText().includes('codex --full-auto'));
     assert.equal(mod.loadMeta().defaultLaunchMode, 'full-auto');
   });
 

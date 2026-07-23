@@ -1084,13 +1084,38 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   blessed.line({ parent: screen, top: 4, left: '50%', height: '100%-7', orientation: 'vertical', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Right Panel ───────────────────────────────────────────────────────
+  // Metadata and resume controls stay fixed while the conversation between
+  // them has its own scroll position.
   const detailPanel = blessed.box({
     parent: screen,
     top: 4, left: '50%+1', width: '50%-1', height: '100%-7',
+    style: { bg: '#141414' },
+  });
+
+  const detailMetaPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-meta',
+    top: 0, left: 0, width: '100%', height: 1,
+    tags: true,
+    style: { bg: '#141414' },
+  });
+
+  const detailMessagesPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-messages',
+    top: 1, left: 0, width: '100%', bottom: 4,
     tags: true, scrollable: true, alwaysScroll: true,
     scrollbar: { ch: '▐', style: { fg: '#8a8178' } },
     style: { bg: '#141414' },
     mouse: true,
+  });
+
+  const detailActionPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-action',
+    bottom: 0, left: 0, width: '100%', height: 4,
+    tags: true,
+    style: { bg: '#141414' },
   });
 
   blessed.line({ parent: screen, bottom: 2, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#3a3f46', bg: '#141414' } });
@@ -1229,31 +1254,86 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   }
 
   // ─── Render Detail Panel ───────────────────────────────────────────────
+  let currentMetaContent = '';
+  let currentMessagesContent = '';
+  let currentActionContent = '';
+
+  function renderedLineCount(panel, content) {
+    if (!content) return 0;
+    panel.parseContent();
+    return panel.getScreenLines().length;
+  }
+
+  function layoutDetailPanels() {
+    const availableHeight = Math.max(
+      1,
+      Number(detailPanel.height) || Math.max(1, (screen.height || 24) - 7),
+    );
+    const requestedMetaHeight = renderedLineCount(detailMetaPanel, currentMetaContent);
+    const requestedActionHeight = renderedLineCount(detailActionPanel, currentActionContent);
+    const actionHeight = Math.min(requestedActionHeight, Math.max(0, availableHeight - 1));
+    const metaHeight = Math.min(
+      requestedMetaHeight,
+      Math.max(0, availableHeight - actionHeight - 1),
+    );
+    const messagesHeight = Math.max(1, availableHeight - metaHeight - actionHeight);
+
+    detailMetaPanel.height = metaHeight;
+    detailMessagesPanel.top = metaHeight;
+    detailMessagesPanel.bottom = actionHeight;
+    detailActionPanel.height = actionHeight;
+
+    // Resizing can make a previously valid childBase too large. Blessed only
+    // clamps when the target offset changes, so calculate the new maximum and
+    // explicitly move back inside it.
+    detailMessagesPanel.parseContent();
+    const maxScroll = Math.max(
+      0,
+      detailMessagesPanel.getScreenLines().length - messagesHeight,
+    );
+    const currentScroll = detailMessagesPanel.getScroll();
+    if (currentScroll > maxScroll) detailMessagesPanel.setScroll(maxScroll);
+  }
+
+  function setDetailContent(metaContent, messagesContent, actionContent) {
+    currentMetaContent = metaContent;
+    currentMessagesContent = messagesContent;
+    currentActionContent = actionContent;
+    detailMetaPanel.setContent(metaContent);
+    detailMessagesPanel.setContent(messagesContent);
+    detailActionPanel.setContent(actionContent);
+    layoutDetailPanels();
+    detailMessagesPanel.setScroll(0);
+  }
+
+  screen.on('resize', () => {
+    layoutDetailPanels();
+    screen.render();
+  });
+
   function renderDetail() {
     if (selectedIndex === -1) {
       const cli = CLI.name;
       const launchMode = getLaunchMode(launchModeId);
       const launchCommand = buildCodexCommand({ modeId: launchModeId });
-      let c = '';
-      c += `\n {#a3e635-fg}{bold}Start a New Conversation{/}\n`;
-      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n\n`;
-      c += ` {#e7dccf-fg}Open a fresh Codex session and start{/}\n`;
-      c += ` {#e7dccf-fg}working in the current directory.{/}\n\n`;
-      c += ` {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}\n`;
-      c += ` {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}\n`;
-      c += ` {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}\n`;
-      c += ` {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}\n\n`;
-      c += ` {#8a8178-fg}${launchMode.description}{/}\n\n`;
-      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n`;
-      c += ` {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}\n`;
-      c += ` {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}\n`;
-      detailPanel.setContent(c);
-      detailPanel.setScroll(0);
+      const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
+      const metaContent = ` {#a3e635-fg}{bold}Start a New Conversation{/}\n${sep}`
+        + `\n {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}`
+        + `\n {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}`
+        + `\n {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}`
+        + `\n {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}`;
+      const messagesContent = `\n {#e7dccf-fg}Open a fresh Codex session and start{/}`
+        + `\n {#e7dccf-fg}working in the current directory.{/}`
+        + `\n\n {#8a8178-fg}${launchMode.description}{/}`;
+      const actionContent = `${sep}`
+        + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}`
+        + `\n {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}`;
+      setDetailContent(metaContent, messagesContent, actionContent);
       return;
     }
 
     if (displayRows.length === 0 || !displayRows[selectedIndex]) {
-      detailPanel.setContent('\n  {#8a8178-fg}No session selected{/}');
+      setDetailContent('', '\n  {#8a8178-fg}No session selected{/}', '');
       return;
     }
 
@@ -1268,15 +1348,15 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (sm && sm.customTitle) session.customTitle = sm.customTitle;
 
     const color = getProjectColor(session.project, projectColorMap);
-    let c = '';
+    let metaContent = '';
     const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
 
     // Title
-    c += `\n {${color}-fg}{bold}█ ${session.project}{/}\n`;
+    metaContent += ` {${color}-fg}{bold}█ ${session.project}{/}\n`;
     if (session.customTitle) {
-      c += ` {#5bd1b9-fg}{bold}${esc(session.customTitle)}{/}\n`;
+      metaContent += ` {#5bd1b9-fg}{bold}${esc(session.customTitle)}{/}\n`;
     }
-    c += sep + '\n\n';
+    metaContent += sep + '\n\n';
 
     const fields = [
       ['Session', `{#5ad1e6-fg}${session.sessionId}{/}`],
@@ -1302,46 +1382,46 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     fields.push(['Resume with', `{#ff5d73-fg}${launchMode.label}{/}`]);
 
     for (const [label, value] of fields) {
-      c += ` {#8a8178-fg}${label.padEnd(12)}{/} ${value}\n`;
+      metaContent += ` {#8a8178-fg}${label.padEnd(12)}{/} ${value}\n`;
     }
 
     if (session.toolsUsed && session.toolsUsed.length > 0) {
-      c += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
+      metaContent += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
       const chips = session.toolsUsed.slice(0, 10).map(t => `{#3a3f46-fg}[{/}{#5ad1e6-fg}${t}{/}{#3a3f46-fg}]{/}`).join(' ');
-      c += ` ${chips}\n`;
-      if (session.toolsUsed.length > 10) c += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
+      metaContent += ` ${chips}\n`;
+      if (session.toolsUsed.length > 10) metaContent += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
     }
 
-    c += `\n {#ffd166-fg}{bold}Conversation{/}\n`;
-    c += sep + '\n';
+    metaContent += `\n {#ffd166-fg}{bold}Conversation{/}\n`;
+    metaContent += sep;
 
-    const detailHeight = detailPanel.height || screen.height || 24;
-    const previewLimit = Math.max(10, Math.floor(Math.max(0, detailHeight - 18) / 3));
-    const msgs = (session.userMessages || []).slice(0, previewLimit);
-    const assists = (session.assistantSnippets || []);
+    const messages = session.userMessages || [];
+    const assists = session.assistantSnippets || [];
+    let messagesContent = '';
 
-    if (msgs.length === 0) {
-      c += `\n  {#8a8178-fg}(no readable messages){/}\n`;
+    if (messages.length === 0) {
+      messagesContent = `\n  {#8a8178-fg}(no readable messages){/}`;
     } else {
-      msgs.forEach((msg, i) => {
-        const clean = esc(msg.replace(/\n/g, ' ').trim());
+      messages.forEach((message, index) => {
+        const clean = esc(message.replace(/\n/g, ' ').trim());
         const trunc = clean.length > 80 ? clean.substring(0, 80) + '…' : clean;
-        c += `\n {#ff7a1a-fg}{bold}You >{/} ${trunc}\n`;
-        if (assists[i]) {
-          const aClean = esc(assists[i].replace(/\n/g, ' ').trim());
+        // Keep each Codex response visually attached to its user turn while
+        // preserving a blank line between consecutive turns.
+        messagesContent += `${messagesContent ? '\n' : ''}\n {#ff7a1a-fg}{bold}You >{/} ${trunc}`;
+        if (assists[index]) {
+          const aClean = esc(assists[index].replace(/\n/g, ' ').trim());
           const aTrunc = aClean.length > 80 ? aClean.substring(0, 80) + '…' : aClean;
-          c += ` {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}\n`;
+          messagesContent += `\n {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}`;
         }
       });
     }
 
-    c += `\n${sep}`;
-    c += `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`;
-    c += `\n {#8a8178-fg}${resumeCommand}{/}\n`;
-    c += ` {#8a8178-fg}${launchMode.description}{/}\n`;
+    const actionContent = `${sep}`
+      + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`
+      + `\n {#8a8178-fg}${resumeCommand}{/}`
+      + `\n {#8a8178-fg}${launchMode.description}{/}`;
 
-    detailPanel.setContent(c);
-    detailPanel.setScroll(0);
+    setDetailContent(metaContent, messagesContent, actionContent);
   }
 
   // ─── Render All ────────────────────────────────────────────────────────
@@ -2051,9 +2131,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
   });
 
-  // Mouse wheel on detail
-  detailPanel.on('wheeldown', () => { detailPanel.scroll(2); screen.render(); });
-  detailPanel.on('wheelup', () => { detailPanel.scroll(-2); screen.render(); });
+  // Only the conversation viewport scrolls; metadata and resume controls are
+  // separate fixed panels.
+  detailMessagesPanel.removeAllListeners('wheeldown');
+  detailMessagesPanel.removeAllListeners('wheelup');
+  detailMessagesPanel.on('wheeldown', () => { detailMessagesPanel.scroll(2); screen.render(); });
+  detailMessagesPanel.on('wheelup', () => { detailMessagesPanel.scroll(-2); screen.render(); });
 
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
