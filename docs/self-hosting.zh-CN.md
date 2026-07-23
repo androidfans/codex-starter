@@ -1,190 +1,129 @@
 # Codex Starter 自托管维护指南
 
-本文适合希望从自己的 Git fork 持续维护 `codex-starter`，并在修改源码后手动安装本地版本的用户。
-
-这里的“自托管”是指：源码保存在自己的 fork 和本地 Git 工作区中；测试通过后，通过 npm 将当时的源码复制到全局安装目录。之后修改工作区不会立即影响日常使用的 `codex-starter` 命令。
-
 ## Cheat Sheet
 
-首次切换到 self-host：
+每次改完代码并准备使用新版本时，在仓库根目录重新运行：
 
 ```bash
-# 1. 同步自己的 main
-git switch main
-git fetch upstream --tags --prune
-git merge --ff-only upstream/main
-git push origin main
+npm run test:all && npm install -g . --install-links
+```
 
-# 2. 安装依赖并测试
-npm ci
-npm run test:all
+测试通过后，npm 会把当前源码复制为一份固定副本：
 
-# 3. 用当前源码安装一份固定副本
+- 包目录：`/Users/rejectliu/.local/lib/node_modules/codex-starter`
+- 命令入口：`/Users/rejectliu/.local/bin/codex-starter`
+
+之后继续修改仓库不会影响这份副本；下次要更新日常使用的版本，再运行同一条命令即可。
+
+## 为什么默认使用固定副本
+
+本指南默认使用：
+
+```bash
 npm install -g . --install-links
-hash -r
-
-# 4. 验证
-codex-starter --version
-command -v codex-starter
-npm list -g codex-starter --depth=0
 ```
 
-以后每次修改或同步源码后，运行：
+在当前 npm 中，直接对本地目录执行 `npm install -g .` 可能创建指向工作区的链接；`--install-links` 会先打包再复制，确保全局命令使用稳定快照。
 
-```bash
-npm ci
-npm run test:all
-npm install -g . --install-links
-hash -r
-```
+固定副本有这些特性：
 
-其中 `--install-links` 很重要。单独运行 `npm install -g .` 时，npm 默认可能把全局包链接回当前工作区；加上该参数后，npm 会把本地包打包并复制到全局目录，符合“修改后手动重新安装才生效”的工作方式。
+- 只有测试并重新安装后，修改才会影响日常命令。
+- 切换分支、产生未提交修改时，不会意外改变正在使用的版本。
+- 移动或删除源码目录后，已经安装的命令仍可运行。
+- 每次合并或同步代码后都需要重新安装。
 
-## 前置条件
+## 首次配置或迁移
 
-- Node.js 18 或更高版本
-- Node.js 附带的 npm
-- Git
-- 一个 GitHub fork
-- `origin` 指向自己的 fork，`upstream` 指向原作者仓库
+这里的 self-host 是指：源码由自己的 GitHub fork 和本地仓库维护；测试通过后，使用 npm 将当时的源码复制到全局安装目录。需要 Node.js 18 或更高版本、npm 和 Git。
 
-检查远端：
-
-```bash
-git remote -v
-```
-
-如果还没有配置 `upstream`：
+远端应当是 `origin` 指向自己的 fork，`upstream` 指向原作者仓库。缺少 `upstream` 时执行：
 
 ```bash
 git remote add upstream https://github.com/Bojun-Vvibe/codex-starter.git
 ```
 
-## 一次性迁移
-
-### 1. 同步上游代码
-
-先确保 `main` 没有未提交的修改：
-
-```bash
-git switch main
-git status
-git fetch upstream --tags --prune
-git merge --ff-only upstream/main
-git push origin main
-```
-
-`--ff-only` 会在主分支已经产生分叉时停止，避免意外制造合并提交。
-
-### 2. 安装依赖并运行测试
+首次安装或从 `npm link` 切回固定副本：
 
 ```bash
 npm ci
 npm run test:all
-```
-
-只有测试通过后再更新全局命令，日常使用的版本才会保持稳定。
-
-### 3. 清理旧的全局安装
-
-如果以前通过 Bun 全局安装过该命令，只需迁移时清理一次：
-
-```bash
-bun remove -g codex-starter
-hash -r
-```
-
-如果使用的是当前仓库注册的 `bun link`，则在仓库根目录执行：
-
-```bash
-bun unlink
-hash -r
-```
-
-如果以前已经通过 npm 安装，不必先卸载；下一步会替换同名全局包。若旧安装使用了 `sudo npm install -g`，仅在清理该包时对应执行：
-
-```bash
-sudo npm uninstall -g codex-starter
-```
-
-之后不要继续使用 `sudo` 安装 npm 全局包；应将 npm prefix 配置到当前用户可写的目录。
-
-### 4. 安装当前源码的固定副本
-
-在仓库根目录执行：
-
-```bash
 npm install -g . --install-links
-hash -r
 ```
 
-验证：
+该安装命令会直接替换同名的 npm 全局副本或 npm 链接，不需要预先卸载。如果 `command -v codex-starter` 指向 `~/.bun/bin`，先在仓库根目录执行 `bun unlink`，再运行上面的安装命令。
 
-```bash
-codex-starter --version
-command -v codex-starter
-npm list -g codex-starter --depth=0
-realpath "$(command -v codex-starter)"
-```
+## 日常维护
 
-`realpath` 应指向 npm 的全局安装目录，而不是当前 Git 工作区。此后修改 `index.js` 不会立即影响全局命令。
+### 同步原作者仓库
 
-## 日常维护流程
-
-### 同步原作者的新版本
+自己的 `main` 已包含 fork 独有提交。原作者将来更新后，两条历史会分叉，因此 `git merge --ff-only upstream/main` 会失败。使用普通 merge，并在测试通过后再推送：
 
 ```bash
 git switch main
-git status
+git pull --ff-only origin main
+git status --short
 git fetch upstream --tags --prune
-git merge --ff-only upstream/main
-git push origin main
+git merge upstream/main
+
+# 如有冲突，解决并完成 merge 后再继续
 npm ci
 npm run test:all
+git push origin main
 npm install -g . --install-links
 hash -r
 ```
-
-最后一次安装命令负责把刚通过测试的源码更新到全局副本。
 
 ### 开发自己的功能
 
-不要直接在 `main` 上开发。为每项改动创建分支：
-
 ```bash
 git switch main
+git pull --ff-only origin main
 git switch -c feat/my-change
 
-# 修改并验证代码
+# 修改并验证
 npm run test:all
-
-# 更新本机使用的固定副本
-npm install -g . --install-links
-hash -r
-
 git add .
 git commit -m "feat: describe my change"
 git push -u origin feat/my-change
 ```
 
-## self-host 模式下不要使用 `--update`
+通过 PR 合并到自己的 `main` 后，再从 `main` 执行 Cheat Sheet 中的安装流程。
 
-`codex-starter --update` 安装的是 npm registry 中的官方最新版：
+## 可选：npm link 开发模式
 
-```bash
-npm install -g codex-starter@latest
-```
-
-它不会安装当前工作区的自定义修改。self-host 模式应通过 Git 同步源码，然后重新执行：
+如果希望源码修改立即反映到全局命令，可以在仓库根目录执行：
 
 ```bash
 npm ci
+npm link
+hash -r
+```
+
+验证时，`realpath "$(command -v codex-starter)"` 应指向当前仓库的 `index.js`。链接模式适合短期开发，但切换分支或写入未完成代码也会立即影响命令。
+
+开发结束后恢复固定副本：
+
+```bash
 npm run test:all
 npm install -g . --install-links
 hash -r
 ```
 
-## 恢复使用官方版本
+## 不要使用程序自带的 `--update`
+
+`codex-starter --update` 安装的是 npm registry 中原作者发布的版本：
+
+```bash
+npm install -g codex-starter@latest
+```
+
+它不会安装自己 fork 中的修改。self-host 模式应通过 Git 更新源码，再运行测试和本地固定副本安装命令。
+
+## GitHub Actions 与 npm 发布
+
+本地 self-host 不需要 npm 包的发布权限。仓库工作流会在 `v*` tag 上尝试发布名为 `codex-starter` 的官方同名包；没有该 npm 包权限时不要创建发布 tag。若以后需要公开发布 fork，应先改为自己拥有的包名或 npm scope，并同步修改更新逻辑。
+
+## 恢复官方 npm 版本
 
 ```bash
 npm install -g codex-starter@latest
@@ -192,13 +131,11 @@ hash -r
 codex-starter --version
 ```
 
-这不会删除 Git 仓库和个人分支。之后随时可以运行 `npm install -g . --install-links` 切回本地版本。
-
 ## 常见问题
 
-### 修改源码后，为什么全局命令没有变化？
+### 为什么修改源码后命令没有变化？
 
-这是固定副本模式的预期行为。测试后重新安装：
+这是固定副本模式的预期行为：
 
 ```bash
 npm run test:all
@@ -206,23 +143,14 @@ npm install -g . --install-links
 hash -r
 ```
 
-### GitHub 已发布新版本，本地为什么还是旧版本？
+### 为什么 `--version` 相同，代码却可能不同？
 
-分别检查 Git 源码、当前全局命令和 registry 版本：
+fork 的提交不一定同步修改 `package.json` 版本号，因此 `--version` 不能证明已安装最新源码。使用：
 
 ```bash
-git describe --tags --always
-node -p "require('./package.json').version"
-codex-starter --version
-npm view codex-starter version
+cmp -s index.js "$(realpath "$(command -v codex-starter)")" && echo "source matches"
 ```
-
-这几项在尚未同步源码或重新安装时可以不同。
 
 ### npm 全局安装报 `EACCES`
 
-通常是以前通过 `sudo npm install -g` 留下了 root 所有权文件。只清理对应的旧包，然后把 npm prefix 配置到当前用户可写目录；不要递归修改整个系统目录的权限。
-
-### 移动或删除项目目录后，命令还能运行吗？
-
-能。固定副本已经位于 npm 全局目录，不依赖原工作区。只有下一次更新本地版本时，才需要进入新的源码目录重新运行安装命令。
+通常是以前通过 `sudo npm install -g` 留下了 root 所有权文件。只清理这个包，并把 npm prefix 配置到当前用户可写目录；不要递归修改整个系统目录的权限。
