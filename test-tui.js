@@ -212,6 +212,8 @@ function createMockWidget(label, opts = {}) {
 }
 
 const mockScreen = createMockWidget('screen');
+let screenOptions;
+let inputSourceActivationCount = 0;
 mockScreen.width = 120;
 mockScreen.height = 40;
 mockScreen.on = function(event, handler) {
@@ -221,7 +223,10 @@ mockScreen.on = function(event, handler) {
 };
 
 const mockBlessed = {
-  screen: () => mockScreen,
+  screen: (opts) => {
+    screenOptions = opts;
+    return mockScreen;
+  },
   box: (opts) => {
     const widget = createMockWidget('box', opts);
     if (opts.parent === mockScreen && opts.top === 0) widgets.header = widget;
@@ -286,7 +291,9 @@ function triggerWidgetKey(widget, keyName, ch = null) {
 }
 
 before(async () => {
-  mod.createApp();
+  mod.createApp({
+    activateInputSource: () => { inputSourceActivationCount++; },
+  });
   assert.match(widgets.header.getContent(), /indexing search/);
   // Initial render happens synchronously; search indexing starts on the next
   // event-loop turn and streams each transcript without blocking the TUI.
@@ -307,6 +314,13 @@ after(() => {
 });
 
 describe('codex starter tui', () => {
+  it('requests focus reporting and activates ABC on focus or mouse down', () => {
+    assert.equal(screenOptions.sendFocus, true);
+    mockScreen.emit('focus');
+    mockScreen.emit('mousedown', { action: 'mousedown' });
+    assert.equal(inputSourceActivationCount, 2);
+  });
+
   it('renders Codex Starter header and list items', () => {
     assert.match(widgets.header.getContent(), /Codex Starter/);
     assert.match(widgets.header.getContent(), /conversations · 3 versions/);

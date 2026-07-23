@@ -34,6 +34,7 @@ const {
   getLaunchMode,
   buildCodexCommand,
   switchToAbcInputSource,
+  createInputSourceActivator,
   detectCLI,
   getShellCommand,
   CODEX_DIR,
@@ -177,12 +178,30 @@ describe('helpers', () => {
     assert.equal(calls[1].command, '/usr/bin/osascript');
     assert.deepEqual(calls[1].args.slice(0, 3), ['-l', 'JavaScript', '-e']);
     assert.match(calls[1].args[3], /com\.apple\.keylayout\.ABC/);
+    assert.match(calls[1].args[3], /ObjC\.bindFunction\("TISSelectInputSource"/);
+    assert.match(calls[1].args[3], /sources\.objectAtIndex\(0\)/);
   });
 
   it('does not switch input sources outside macOS', () => {
     let called = false;
     assert.equal(switchToAbcInputSource('linux', () => { called = true; }), false);
     assert.equal(called, false);
+  });
+
+  it('debounces repeated input-source activation', () => {
+    let currentTime = 1000;
+    let switchCount = 0;
+    const activate = createInputSourceActivator(
+      () => { switchCount++; return true; },
+      () => currentTime,
+    );
+
+    assert.equal(activate(), true);
+    currentTime = 1100;
+    assert.equal(activate(), false);
+    currentTime = 1250;
+    assert.equal(activate(), true);
+    assert.equal(switchCount, 2);
   });
 });
 

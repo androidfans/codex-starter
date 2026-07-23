@@ -81,12 +81,12 @@ function switchToAbcInputSource(platform = process.platform, runCommand = spawnS
   // only tools included with macOS and does not require Accessibility access.
   const script = [
     'ObjC.import("Carbon");',
-    `const id = $("${ABC_INPUT_SOURCE_ID}");`,
-    'const filter = $.NSDictionary.dictionaryWithObjectForKey(id, $.kTISPropertyInputSourceID);',
+    'ObjC.bindFunction("TISCreateInputSourceList", ["id", ["id", "bool"]]);',
+    'ObjC.bindFunction("TISSelectInputSource", ["int", ["id"]]);',
+    `const filter = $({"TISPropertyInputSourceID": "${ABC_INPUT_SOURCE_ID}"});`,
     'const sources = $.TISCreateInputSourceList(filter, false);',
-    'if ($.CFArrayGetCount(sources) === 0) throw new Error("ABC input source not found");',
-    'const source = $.CFArrayGetValueAtIndex(sources, 0);',
-    'const status = $.TISSelectInputSource(source);',
+    'if (Number(sources.count) === 0) throw new Error("ABC input source not found");',
+    'const status = $.TISSelectInputSource(sources.objectAtIndex(0));',
     'if (status !== 0) throw new Error("TISSelectInputSource failed: " + status);',
   ].join(' ');
 
@@ -96,6 +96,20 @@ function switchToAbcInputSource(platform = process.platform, runCommand = spawnS
   } catch (_) {
     return false;
   }
+}
+
+function createInputSourceActivator(
+  switchInputSource = switchToAbcInputSource,
+  now = Date.now,
+  debounceMs = 250,
+) {
+  let lastActivationAt = -Infinity;
+  return function activateInputSource() {
+    const currentTime = now();
+    if (currentTime - lastActivationAt < debounceMs) return false;
+    lastActivationAt = currentTime;
+    return switchInputSource();
+  };
 }
 
 // ─── Color Palette (Ember Terminal) ──────────────────────────────────────────
@@ -960,7 +974,7 @@ function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp() {
+function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
   const allSessions = loadAllSessions();
   const meta = loadMeta();
 
@@ -1000,7 +1014,14 @@ function createApp() {
     fullUnicode: true,
     autoPadding: true,
     dockBorders: true,
+    sendFocus: true,
   });
+
+  // Terminal focus reporting also covers tmux pane/window selection when
+  // tmux has focus-events enabled. Mouse down is a fallback for terminals
+  // that support mouse reporting but not the focus protocol.
+  screen.on('focus', activateInputSource);
+  screen.on('mousedown', activateInputSource);
 
   // Force screen-level fill color so no terminal bg leaks through
   screen.style = { bg: 233 };  // 233 = xterm color closest to #141414
@@ -2094,6 +2115,7 @@ if (typeof module !== 'undefined') {
     getLaunchMode,
     buildCodexCommand,
     switchToAbcInputSource,
+    createInputSourceActivator,
     // List mode (for integration tests)
     runListMode,
     // TUI (for interaction tests)
@@ -2192,6 +2214,7 @@ TUI Keyboard Shortcuts:
     process.exit(0);
   }
 
-  switchToAbcInputSource();
-  createApp();
+  const activateInputSource = createInputSourceActivator();
+  activateInputSource();
+  createApp({ activateInputSource });
 }
