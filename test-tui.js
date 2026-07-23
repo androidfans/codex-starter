@@ -643,6 +643,17 @@ describe('codex starter tui', () => {
     for (const ch of 'family-marker release-summary-marker') triggerKeypress(ch);
     assert.ok(widgets.list.items.some(item => item.includes('→ Latest')),
       'family titles combine with member transcript text during search');
+    triggerKeypress(null, 'enter');
+    triggerScreenKey('enter');
+
+    triggerScreenKey('r');
+    for (let i = 0; i < 20; i++) triggerKeypress(null, 'backspace');
+    for (const ch of 'renamed-conversation') triggerKeypress(ch);
+    triggerKeypress(null, 'enter');
+    assert.ok(!widgets.list.items.some(item => item.includes('→ Latest')),
+      'renaming immediately reapplies a retained title filter');
+    await new Promise(resolve => setTimeout(resolve, 220));
+    triggerWidgetKey(widgets.renameConfirm, 'escape');
     triggerKeypress(null, 'escape');
 
     triggerScreenKey('home');

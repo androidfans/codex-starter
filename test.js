@@ -24,6 +24,8 @@ const {
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
+  getFamilyTitleForRow,
+  rowTargetsFamilyTitle,
   formatTimestamp,
   formatFileSize,
   loadMeta,
@@ -615,6 +617,19 @@ describe('fork families', () => {
     assert.equal(families.length, 1);
     assert.equal(families[0].hasForks, false);
     assert.deepEqual(rows.map(row => [row.kind, row.session.sessionId]), [['session', 'only']]);
+  });
+
+  it('keeps a family title editable after only one version survives', () => {
+    const only = session('only', '', '2026-04-13T01:00:00.000Z');
+    const row = buildVisibleSessionRows(buildSessionFamilies([only]), new Set())[0];
+    const meta = { families: { only: { customTitle: 'stable family title' } } };
+
+    assert.equal(getFamilyTitleForRow(meta, row), 'stable family title');
+    assert.equal(rowTargetsFamilyTitle(meta, row), true);
+
+    row.family.hasForks = true;
+    assert.equal(getFamilyTitleForRow(meta, row), '');
+    assert.equal(rowTargetsFamilyTitle(meta, row), false);
   });
 
   it('aggregates linear and parallel forks and chooses the newest leaf', () => {

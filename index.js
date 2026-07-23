@@ -149,6 +149,20 @@ function getFamilyMeta(meta, familyId) {
   return (meta.families && meta.families[familyId]) || {};
 }
 
+function getFamilyTitleForRow(meta, row) {
+  if (!row || !row.family) return '';
+  const title = getFamilyMeta(meta, row.family.familyId).customTitle || '';
+  // A surviving singleton still represents the titled conversation after its
+  // other versions are deleted. Expanded version rows remain version-scoped.
+  return row.kind === 'family' || !row.family.hasForks ? title : '';
+}
+
+function rowTargetsFamilyTitle(meta, row) {
+  return Boolean(row && (
+    row.kind === 'family' || getFamilyTitleForRow(meta, row)
+  ));
+}
+
 // ─── Data Layer ──────────────────────────────────────────────────────────────
 
 function getProjectDisplayName(cwd) {
@@ -1227,9 +1241,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
       const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
       const topicMaxLen = Math.max(0, listW - fixedLen);
-      const familyTitle = row.kind === 'family'
-        ? getFamilyMeta(meta, row.family.familyId).customTitle || ''
-        : '';
+      const familyTitle = getFamilyTitleForRow(meta, row);
       const hasCustomTitle = Boolean(familyTitle || session.customTitle);
       let topic = familyTitle || session.customTitle || session.topic;
 
@@ -1404,9 +1416,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     const color = getProjectColor(session.project, projectColorMap);
     let metaContent = '';
     const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
-    const familyTitle = selectedRow.kind === 'family'
-      ? getFamilyMeta(meta, selectedRow.family.familyId).customTitle || ''
-      : '';
+    const familyTitle = getFamilyTitleForRow(meta, selectedRow);
     const selectedTitle = familyTitle || session.customTitle || '';
 
     // Title
@@ -2034,7 +2044,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
   function showRenameInput(row) {
     renameTarget = row;
-    const isFamily = row.kind === 'family';
+    const isFamily = rowTargetsFamilyTitle(meta, row);
     renameValue = isFamily
       ? getFamilyMeta(meta, row.family.familyId).customTitle || ''
       : row.session.customTitle || '';
@@ -2083,7 +2093,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     newTitle = (newTitle || '').trim();
     const session = row.session;
 
-    if (row.kind === 'family') {
+    if (rowTargetsFamilyTitle(meta, row)) {
       if (!meta.families) meta.families = {};
       if (newTitle) {
         meta.families[row.family.familyId] = { customTitle: newTitle };
@@ -2108,7 +2118,11 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
     saveMeta(meta);
 
-    renderAll();
+    if (filterText || projectFilter) {
+      applyFilter({ preserveSelection: true });
+    } else {
+      renderAll();
+    }
 
     // Ask whether to resume this session after rename
     // We use renameJustFinished flag to prevent the Enter key from rename
@@ -2257,6 +2271,8 @@ if (typeof module !== 'undefined') {
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,
+    getFamilyTitleForRow,
+    rowTargetsFamilyTitle,
     // Formatting
     formatTimestamp,
     formatFileSize,
