@@ -63,6 +63,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 - Dangerous mode with `d`, remembered for the next launch
 - Explicit launch mode selector with `m`, persisted locally
 - Project filter with `p`
+- Fork families collapsed into one row, with Finder-style expansion
 - Resume selected session with `Enter`
 - Rename selected session with `r`
 - Delete selected session with `x`
@@ -76,6 +77,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 | Key | Action |
 |:---:|--------|
 | `↑` `↓` | Navigate sessions |
+| `←` `→` | Collapse / expand a fork family |
 | `Enter` | Start new / resume selected session |
 | `n` | New session |
 | `m` | Cycle launch mode (remembered) |

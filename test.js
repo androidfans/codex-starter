@@ -22,6 +22,8 @@ const {
   isInteractiveSession,
   loadAllSessions,
   filterSessionList,
+  buildSessionFamilies,
+  buildVisibleSessionRows,
   formatTimestamp,
   formatFileSize,
   loadMeta,
@@ -245,6 +247,48 @@ describe('session parsing', () => {
     assert.equal(session.project, 'test/Desktop/project-beta');
   });
 
+  it('keeps fork metadata canonical when inherited parent metadata follows it', () => {
+    const filePath = writeSession('2026/04/13/rollout-fork.jsonl', [
+      {
+        timestamp: '2026-04-13T04:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'fork-child',
+          forked_from_id: 'fork-parent',
+          timestamp: '2026-04-13T04:00:00.000Z',
+          cwd: '/Users/test/Desktop/fork-child',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-13T03:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'fork-parent',
+          timestamp: '2026-04-13T03:00:00.000Z',
+          cwd: '/Users/test/Desktop/fork-parent',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-13T04:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'edited branch prompt' },
+      },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    assert.equal(session.sessionId, 'fork-child');
+    assert.equal(session.forkedFromId, 'fork-parent');
+
+    loadSessionDetail(session);
+    assert.equal(session.sessionId, 'fork-child');
+    assert.equal(session.forkedFromId, 'fork-parent');
+    assert.equal(session.cwd, '/Users/test/Desktop/fork-child');
+  });
+
   it('keeps a cleared custom title cleared after reloading', () => {
     const filePath = writeSession('2026/04/13/rollout-title-cleared.jsonl', [
       {
@@ -421,6 +465,12 @@ describe('session parsing', () => {
 
     assert.equal(isInteractiveSession(execSession), false);
     assert.equal(isInteractiveSession(cliSession), true);
+    assert.equal(isInteractiveSession({ source: 'cli', originator: '', threadSource: 'subagent' }), false);
+    assert.equal(isInteractiveSession({
+      source: 'cli',
+      originator: '',
+      threadSource: { subagent: { thread_spawn: { parent_thread_id: 'parent' } } },
+    }), false);
   });
 
   it('discovers only interactive sessions from nested date directories', () => {
@@ -450,5 +500,73 @@ describe('session parsing', () => {
     assert.ok(ids.includes('sess-quick'));
     assert.ok(ids.includes('sess-old'));
     assert.ok(!ids.includes('sess-detail'));
+  });
+});
+
+describe('fork families', () => {
+  function session(sessionId, forkedFromId, lastTs) {
+    return {
+      sessionId,
+      forkedFromId: forkedFromId || '',
+      firstTs: lastTs,
+      lastTs,
+      topic: sessionId,
+      project: 'fork-project',
+    };
+  }
+
+  it('keeps singletons as ordinary session rows', () => {
+    const only = session('only', '', '2026-04-13T01:00:00.000Z');
+    const families = buildSessionFamilies([only]);
+    const rows = buildVisibleSessionRows(families, new Set());
+
+    assert.equal(families.length, 1);
+    assert.equal(families[0].hasForks, false);
+    assert.deepEqual(rows.map(row => [row.kind, row.session.sessionId]), [['session', 'only']]);
+  });
+
+  it('aggregates linear and parallel forks and chooses the newest leaf', () => {
+    const root = session('root', '', '2026-04-13T01:00:00.000Z');
+    const branchA = session('branch-a', 'root', '2026-04-13T02:00:00.000Z');
+    const branchB = session('branch-b', 'root', '2026-04-13T03:00:00.000Z');
+    const grandchild = session('grandchild', 'branch-a', '2026-04-13T04:00:00.000Z');
+    const families = buildSessionFamilies([grandchild, branchB, branchA, root]);
+    const family = families[0];
+
+    assert.equal(families.length, 1);
+    assert.equal(family.familyId, 'root');
+    assert.equal(family.defaultSession.sessionId, 'grandchild');
+    assert.deepEqual(
+      family.childrenById.get('root').map(member => member.sessionId),
+      ['branch-a', 'branch-b'],
+    );
+
+    const collapsed = buildVisibleSessionRows(families, new Set());
+    assert.deepEqual(collapsed.map(row => row.kind), ['family']);
+    assert.equal(collapsed[0].session.sessionId, 'grandchild');
+
+    const expanded = buildVisibleSessionRows(families, new Set(['root']));
+    assert.deepEqual(
+      expanded.map(row => `${row.kind}:${row.session.sessionId}`),
+      [
+        'family:grandchild',
+        'session:root',
+        'session:branch-a',
+        'session:grandchild',
+        'session:branch-b',
+      ],
+    );
+    assert.equal(expanded.find(row => row.session.sessionId === 'grandchild').isDefault, true);
+  });
+
+  it('starts an orphaned fork as its own family and honors later parent activity', () => {
+    const orphan = session('orphan', 'missing', '2026-04-13T02:00:00.000Z');
+    const root = session('root-later', '', '2026-04-13T05:00:00.000Z');
+    const child = session('child-earlier', 'root-later', '2026-04-13T04:00:00.000Z');
+    const families = buildSessionFamilies([root, child, orphan]);
+    const parentFamily = families.find(family => family.familyId === 'root-later');
+
+    assert.equal(families.length, 2);
+    assert.equal(parentFamily.defaultSession.sessionId, 'root-later');
   });
 });
