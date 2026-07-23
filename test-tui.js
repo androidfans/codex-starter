@@ -186,7 +186,14 @@ function createMockWidget(label, opts = {}) {
   widget.style = opts.style || {};
   widget.setContent = function(content) { this._content = content; };
   widget.getContent = function() { return this._content; };
-  widget.setItems = function(items) { this._items = [...items]; this.items = [...items]; };
+  widget.setItems = function(items) {
+    this._items = [...items];
+    this.items = [...items];
+    // Blessed may emit while replacing list contents; the app must suppress
+    // this internal selection event while rebuilding fork rows.
+    const index = Math.max(0, Math.min(this._selectedIndex, this.items.length - 1));
+    this.emit('select item', this.items[index], index);
+  };
   widget.select = function(index) { this._selectedIndex = index; };
   widget.focus = function() {};
   widget.destroy = function() { this._destroyed = true; };
@@ -321,8 +328,23 @@ describe('codex starter tui', () => {
     assert.equal(widgets.list.items.filter(item => item.includes('Fork')).length, 2);
 
     triggerScreenKey('down');
+    widgets.list.childBase = 3;
     triggerScreenKey('left');
     assert.equal(widgets.list.items.length, 2);
+    assert.equal(widgets.list.childBase, 0);
+    assert.ok(widgets.list.items.some(item => item.includes('▸')));
+  });
+
+  it('expands and collapses fork families with Vim keys', () => {
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+
+    triggerKeypress('l');
+    assert.equal(widgets.list.items.length, 5, 'l expands the selected family');
+
+    triggerKeypress('j');
+    triggerKeypress('h');
+    assert.equal(widgets.list.items.length, 2, 'h collapses from a child version');
     assert.ok(widgets.list.items.some(item => item.includes('▸')));
   });
 
@@ -369,6 +391,10 @@ describe('codex starter tui', () => {
     triggerScreenKey('/');
     for (const ch of 'tool-only-marker') triggerKeypress(ch);
     assert.ok(!widgets.list.items.some(item => item.includes('→ Latest')));
+    triggerScreenKey('end');
+    assert.equal(widgets.list._selectedIndex, 0);
+    triggerKeypress('G');
+    assert.equal(widgets.list._selectedIndex, 0);
     triggerKeypress(null, 'escape');
   });
 

@@ -76,8 +76,8 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 | Key | Action |
 |:---:|--------|
-| `↑` `↓` | Navigate sessions |
-| `←` `→` | Collapse / expand a fork family |
+| `↑` `↓` or `j` `k` | Navigate sessions |
+| `←` `→` or `h` `l` | Collapse / expand a fork family |
 | `Enter` | Start new / resume selected session |
 | `n` | New session |
 | `m` | Cycle launch mode (remembered) |

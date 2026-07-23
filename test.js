@@ -282,11 +282,48 @@ describe('session parsing', () => {
     const session = loadSessionQuick(filePath);
     assert.equal(session.sessionId, 'fork-child');
     assert.equal(session.forkedFromId, 'fork-parent');
+    assert.deepEqual(session.ancestorIds, ['fork-parent']);
 
     loadSessionDetail(session);
     assert.equal(session.sessionId, 'fork-child');
     assert.equal(session.forkedFromId, 'fork-parent');
     assert.equal(session.cwd, '/Users/test/Desktop/fork-child');
+  });
+
+  it('reads complete fork ancestry beyond the quick-scan byte limit', () => {
+    const padding = 'x'.repeat(140 * 1024);
+    const filePath = writeSession('2026/04/13/rollout-deep-fork.jsonl', [
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'deep-child',
+          forked_from_id: 'deep-parent',
+          timestamp: '2026-04-13T05:00:00.000Z',
+          cwd: '/Users/test/Desktop/deep-fork',
+          source: 'cli',
+          base_instructions: padding,
+        },
+      },
+      {
+        type: 'session_meta',
+        payload: {
+          id: 'deep-parent',
+          forked_from_id: 'deep-root',
+          timestamp: '2026-04-13T04:00:00.000Z',
+          cwd: '/Users/test/Desktop/deep-fork',
+          source: 'cli',
+          base_instructions: padding,
+        },
+      },
+      {
+        type: 'event_msg',
+        timestamp: '2026-04-13T05:00:01.000Z',
+        payload: { type: 'user_message', message: 'deep fork prompt' },
+      },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    assert.deepEqual(session.ancestorIds, ['deep-parent', 'deep-root']);
   });
 
   it('keeps a cleared custom title cleared after reloading', () => {
@@ -568,5 +605,77 @@ describe('fork families', () => {
 
     assert.equal(families.length, 2);
     assert.equal(parentFamily.defaultSession.sessionId, 'root-later');
+  });
+
+  it('keeps sibling forks grouped when their common parent is missing', () => {
+    const branchA = session('orphan-a', 'deleted-parent', '2026-04-13T02:00:00.000Z');
+    const branchB = session('orphan-b', 'deleted-parent', '2026-04-13T03:00:00.000Z');
+    const families = buildSessionFamilies([branchB, branchA]);
+
+    assert.equal(families.length, 1);
+    assert.equal(families[0].familyId, 'deleted-parent');
+    assert.equal(families[0].hasForks, true);
+    assert.equal(families[0].defaultSession.sessionId, 'orphan-b');
+    assert.deepEqual(
+      buildVisibleSessionRows(families, new Set(['deleted-parent']))
+        .filter(row => row.kind === 'session')
+        .map(row => row.session.sessionId)
+        .sort(),
+      ['orphan-a', 'orphan-b'],
+    );
+  });
+
+  it('reconnects descendants through inherited ancestry after an intermediate fork is deleted', () => {
+    const root = session('surviving-root', '', '2026-04-13T01:00:00.000Z');
+    const grandchild = session('surviving-grandchild', 'deleted-middle', '2026-04-13T03:00:00.000Z');
+    grandchild.ancestorIds = ['deleted-middle', 'surviving-root'];
+    const families = buildSessionFamilies([grandchild, root]);
+
+    assert.equal(families.length, 1);
+    assert.equal(families[0].root.sessionId, 'surviving-root');
+    assert.deepEqual(
+      families[0].childrenById.get('surviving-root').map(member => member.sessionId),
+      ['surviving-grandchild'],
+    );
+  });
+
+  it('groups descendants by their oldest shared ancestor when multiple branches were deleted', () => {
+    const branchA = session('survivor-a', 'deleted-a', '2026-04-13T03:00:00.000Z');
+    branchA.ancestorIds = ['deleted-a', 'deleted-root'];
+    const branchB = session('survivor-b', 'deleted-b', '2026-04-13T04:00:00.000Z');
+    branchB.ancestorIds = ['deleted-b', 'deleted-root'];
+    const families = buildSessionFamilies([branchB, branchA]);
+
+    assert.equal(families.length, 1);
+    assert.equal(families[0].familyId, 'deleted-root');
+    assert.deepEqual(families[0].members.map(member => member.sessionId).sort(), [
+      'survivor-a',
+      'survivor-b',
+    ]);
+  });
+
+  it('derives the surviving orphan root from ancestry rather than activity order', () => {
+    const ancestor = session('resumed-ancestor', 'deleted-parent', '2026-04-13T05:00:00.000Z');
+    const child = session('older-child', 'resumed-ancestor', '2026-04-13T04:00:00.000Z');
+    const family = buildSessionFamilies([ancestor, child])[0];
+
+    assert.equal(family.root.sessionId, 'resumed-ancestor');
+    assert.deepEqual(family.childrenById.get('resumed-ancestor').map(member => member.sessionId), [
+      'older-child',
+    ]);
+  });
+
+  it('orders a family by the session represented by its collapsed row', () => {
+    const root = session('large-old-root', '', '2026-04-13T01:00:00.000Z');
+    const singleton = session('medium-singleton', '', '2026-04-13T02:00:00.000Z');
+    const latest = session('small-latest-fork', 'large-old-root', '2026-04-13T03:00:00.000Z');
+    // Simulate a caller sorting by size: root first, singleton second, latest
+    // third. The family row represents latest, so it belongs after singleton.
+    const families = buildSessionFamilies([root, singleton, latest]);
+
+    assert.deepEqual(families.map(family => family.defaultSession.sessionId), [
+      'medium-singleton',
+      'small-latest-fork',
+    ]);
   });
 });
