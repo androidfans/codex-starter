@@ -16,6 +16,8 @@
 const blessed = require('blessed');
 const fs = require('fs');
 const path = require('path');
+const readline = require('readline');
+const { StringDecoder } = require('string_decoder');
 const { spawn, execSync, spawnSync } = require('child_process');
 const os = require('os');
 
@@ -30,14 +32,18 @@ function detectCLI() {
   return { name: 'codex', cmd: 'codex' };
 }
 const CLI = detectCLI();
+const ABC_INPUT_SOURCE_ID = 'com.apple.keylayout.ABC';
 
 function getShellCommand(command) {
   const shellPath = process.env.SHELL || '/bin/sh';
   const shellName = path.basename(shellPath);
-  // A nested interactive zsh can stop on SIGTTOU while restoring terminal
-  // control after Codex exits. Disabling job control avoids that handoff.
+  // Disable zsh job control before interactive-shell initialization. Doing it
+  // inside the command is too late: zsh has already created a new process
+  // group and taken terminal control by then, which can leave the parent
+  // starter in the background and suspend it with SIGTTOU during exit.
   const shellCommand = shellName === 'zsh' ? `unsetopt MONITOR; ${command}` : command;
-  return { shellPath, shellArgs: ['-ic', shellCommand] };
+  const shellArgs = shellName === 'zsh' ? ['+m', '-ic', shellCommand] : ['-ic', shellCommand];
+  return { shellPath, shellArgs };
 }
 
 function getLaunchMode(modeId) {
@@ -60,6 +66,50 @@ function buildCodexCommand({ sessionId, modeId }) {
   const parts = [CLI.cmd, ...mode.args];
   if (sessionId) parts.push('resume', sessionId);
   return parts.join(' ');
+}
+
+function switchToAbcInputSource(platform = process.platform, runCommand = spawnSync) {
+  if (platform !== 'darwin') return false;
+
+  const options = { stdio: 'ignore', timeout: 1000 };
+  try {
+    const macism = runCommand('macism', [ABC_INPUT_SOURCE_ID], options);
+    if (!macism.error && macism.status === 0) return true;
+  } catch (_) { /* try the built-in macOS fallback */ }
+
+  // macism is optional. JXA can call the same Carbon input-source API using
+  // only tools included with macOS and does not require Accessibility access.
+  const script = [
+    'ObjC.import("Carbon");',
+    'ObjC.bindFunction("TISCreateInputSourceList", ["id", ["id", "bool"]]);',
+    'ObjC.bindFunction("TISSelectInputSource", ["int", ["id"]]);',
+    `const filter = $({"TISPropertyInputSourceID": "${ABC_INPUT_SOURCE_ID}"});`,
+    'const sources = $.TISCreateInputSourceList(filter, false);',
+    'if (Number(sources.count) === 0) throw new Error("ABC input source not found");',
+    'const status = $.TISSelectInputSource(sources.objectAtIndex(0));',
+    'if (status !== 0) throw new Error("TISSelectInputSource failed: " + status);',
+  ].join(' ');
+
+  try {
+    const fallback = runCommand('/usr/bin/osascript', ['-l', 'JavaScript', '-e', script], options);
+    return !fallback.error && fallback.status === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function createInputSourceActivator(
+  switchInputSource = switchToAbcInputSource,
+  now = Date.now,
+  debounceMs = 250,
+) {
+  let lastActivationAt = -Infinity;
+  return function activateInputSource() {
+    const currentTime = now();
+    if (currentTime - lastActivationAt < debounceMs) return false;
+    lastActivationAt = currentTime;
+    return switchInputSource();
+  };
 }
 
 // ─── Color Palette (Ember Terminal) ──────────────────────────────────────────
@@ -93,6 +143,44 @@ function saveMeta(meta) {
 
 function getSessionMeta(meta, sessionId) {
   return meta.sessions[sessionId] || {};
+}
+
+function getFamilyMeta(meta, familyId) {
+  return (meta.families && meta.families[familyId]) || {};
+}
+
+function getFamilyTitleForRow(meta, row) {
+  if (!row || !row.family) return '';
+  const title = getFamilyMeta(meta, row.family.familyId).customTitle || '';
+  // A surviving singleton still represents the titled conversation after its
+  // other versions are deleted. Expanded version rows remain version-scoped.
+  return row.kind === 'family' || !row.family.hasForks ? title : '';
+}
+
+function rowTargetsFamilyTitle(meta, row) {
+  return Boolean(row && (
+    row.kind === 'family' || getFamilyTitleForRow(meta, row)
+  ));
+}
+
+function reconcileFamilyMetaAfterDelete(meta, deletedFamily, remainingSessions) {
+  if (!deletedFamily || !meta.families || !meta.families[deletedFamily.familyId]) return;
+
+  const oldFamilyId = deletedFamily.familyId;
+  const familyMeta = meta.families[oldFamilyId];
+  const remainingIds = new Set(remainingSessions.map(session => session.sessionId));
+  const survivingMemberIds = new Set(deletedFamily.members
+    .map(member => member.sessionId)
+    .filter(sessionId => remainingIds.has(sessionId)));
+  const replacementFamilyIds = buildSessionFamilies(remainingSessions)
+    .filter(family => family.members.some(member => survivingMemberIds.has(member.sessionId)))
+    .map(family => family.familyId);
+
+  for (const familyId of replacementFamilyIds) {
+    if (familyId !== oldFamilyId) meta.families[familyId] = { ...familyMeta };
+  }
+  if (!replacementFamilyIds.includes(oldFamilyId)) delete meta.families[oldFamilyId];
+  if (Object.keys(meta.families).length === 0) delete meta.families;
 }
 
 // ─── Data Layer ──────────────────────────────────────────────────────────────
@@ -147,6 +235,39 @@ function readHeadText(filePath, bytes = 256 * 1024) {
   return buffer.toString('utf-8');
 }
 
+function readLeadingSessionMetaEntries(filePath) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  const decoder = new StringDecoder('utf8');
+  const entries = [];
+  let pending = '';
+
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) pending += decoder.end();
+      else pending += decoder.write(buffer.subarray(0, bytesRead));
+
+      let newlineIndex;
+      while ((newlineIndex = pending.indexOf('\n')) !== -1 || (bytesRead === 0 && pending)) {
+        const line = newlineIndex === -1 ? pending : pending.substring(0, newlineIndex);
+        pending = newlineIndex === -1 ? '' : pending.substring(newlineIndex + 1);
+        if (!line.trim()) continue;
+        try {
+          const entry = JSON.parse(line);
+          if (entry.type !== 'session_meta') return entries;
+          entries.push(entry);
+        } catch (_) {
+          return entries;
+        }
+      }
+      if (bytesRead === 0) return entries;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function readTailText(filePath, bytes = 16 * 1024) {
   const stat = fs.statSync(filePath);
   const size = Math.min(bytes, stat.size);
@@ -174,6 +295,21 @@ function extractTextParts(content) {
   return texts;
 }
 
+function getCustomTitleUpdate(entry) {
+  if (entry.type === 'custom-title' && typeof entry.customTitle === 'string') {
+    return entry.customTitle;
+  }
+
+  if (entry.type === 'response_item') {
+    const payload = entry.payload || {};
+    if (payload.type === 'custom-title' && typeof payload.customTitle === 'string') {
+      return payload.customTitle;
+    }
+  }
+
+  return null;
+}
+
 function isBoilerplateText(text) {
   const normalized = String(text || '').trim();
   if (!normalized) return true;
@@ -183,6 +319,8 @@ function isBoilerplateText(text) {
     normalized.startsWith('<permissions instructions>') ||
     normalized.startsWith('<collaboration_mode>') ||
     normalized.startsWith('<skills_instructions>') ||
+    normalized.startsWith('<image name=') ||
+    normalized === '</image>' ||
     normalized.startsWith('You are Codex, a coding agent') ||
     normalized.startsWith('You are GPT-5.4.')
   );
@@ -230,6 +368,67 @@ function extractAssistantText(entry) {
   return '';
 }
 
+function getConversationMessage(entry) {
+  const userText = extractUserText(entry);
+  if (userText) {
+    return {
+      role: 'user',
+      text: userText,
+      phase: '',
+      recordType: entry.type,
+    };
+  }
+
+  const assistantText = extractAssistantText(entry);
+  if (assistantText) {
+    return {
+      role: 'assistant',
+      text: assistantText,
+      phase: (entry.payload && entry.payload.phase) || '',
+      recordType: entry.type,
+    };
+  }
+
+  return null;
+}
+
+function appendConversationMessage(messages, message) {
+  if (!message) return false;
+
+  const previous = messages.at(-1);
+  const isMirroredPair = previous
+    && previous.role === message.role
+    && previous.text === message.text
+    && previous.phase === message.phase
+    && previous.recordType !== message.recordType
+    && [previous.recordType, message.recordType].every(type => (
+      type === 'event_msg' || type === 'response_item'
+    ));
+
+  if (isMirroredPair) {
+    // Prefer the event record when both representations are present. Keeping
+    // the pair local preserves genuinely repeated text in later turns.
+    if (message.recordType === 'event_msg') messages[messages.length - 1] = message;
+    return false;
+  }
+
+  messages.push(message);
+  return true;
+}
+
+function appendConversationEntry(messages, entry) {
+  const payload = entry.payload || {};
+  const isTurnBoundary = entry.type === 'event_msg'
+    && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
+  if (isTurnBoundary) {
+    if (!messages.at(-1)?.isTurnBoundary) messages.push({ isTurnBoundary: true });
+    return null;
+  }
+
+  const message = getConversationMessage(entry);
+  return appendConversationMessage(messages, message) ? message : null;
+}
+
 function getEntryTimestamp(entry) {
   if (!entry || typeof entry !== 'object') return null;
   if (entry.timestamp) return entry.timestamp;
@@ -268,10 +467,25 @@ function loadSessionQuick(filePath) {
   let modelProvider = '';
   let source = '';
   let originator = '';
+  let forkedFromId = '';
+  let threadSource = '';
+  const ancestorIds = [];
   let firstUserMsg = '';
   let userMsgCount = 0;
   let assistantMsgCount = 0;
+  let quickMessages = [];
   let customTitle = '';
+
+  function countMessage(entry) {
+    const message = appendConversationEntry(quickMessages, entry);
+    if (!message) return;
+    if (message.role === 'user') {
+      userMsgCount++;
+      if (!firstUserMsg) firstUserMsg = message.text;
+    } else {
+      assistantMsgCount++;
+    }
+  }
 
   const firstLine = readFirstLine(filePath);
   if (firstLine) {
@@ -286,8 +500,22 @@ function loadSessionQuick(filePath) {
         modelProvider = payload.model_provider || '';
         source = payload.source || '';
         originator = payload.originator || '';
+        forkedFromId = payload.forked_from_id || '';
+        threadSource = payload.thread_source || '';
       }
     } catch (_) { /* ignore */ }
+  }
+
+  // Fork history begins with one session_meta per inherited generation. Read
+  // that contiguous prefix without a byte cap so deep edit chains retain
+  // enough ancestry to survive deletion of intermediate rollout files.
+  for (const metaEntry of readLeadingSessionMetaEntries(filePath)) {
+    const payload = metaEntry.payload || {};
+    for (const candidate of [payload.id, payload.forked_from_id]) {
+      if (candidate && candidate !== sessionId && !ancestorIds.includes(candidate)) {
+        ancestorIds.push(candidate);
+      }
+    }
   }
 
   for (const line of headText.split('\n').filter(Boolean)) {
@@ -297,20 +525,10 @@ function loadSessionQuick(filePath) {
       if (!firstTs && ts) firstTs = ts;
       if (ts) lastTs = ts;
 
-      const userText = extractUserText(entry);
-      if (userText) {
-        userMsgCount++;
-        if (!firstUserMsg) firstUserMsg = userText;
-      }
+      countMessage(entry);
 
-      const assistantText = extractAssistantText(entry);
-      if (assistantText) assistantMsgCount++;
-
-      if (entry.type === 'response_item') {
-        const payload = entry.payload || {};
-        if (payload.type === 'custom-title' && payload.customTitle) customTitle = payload.customTitle;
-      }
-      if (entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+      const titleUpdate = getCustomTitleUpdate(entry);
+      if (titleUpdate !== null) customTitle = titleUpdate;
     } catch (_) { /* ignore */ }
   }
 
@@ -320,12 +538,17 @@ function loadSessionQuick(filePath) {
         const entry = JSON.parse(line);
         const ts = getEntryTimestamp(entry);
         if (ts) lastTs = ts;
-        if (!customTitle && entry.type === 'custom-title' && entry.customTitle) customTitle = entry.customTitle;
+        const titleUpdate = getCustomTitleUpdate(entry);
+        if (titleUpdate !== null) customTitle = titleUpdate;
       } catch (_) { /* ignore */ }
     }
   }
 
   if (!firstUserMsg) {
+    firstUserMsg = '';
+    userMsgCount = 0;
+    assistantMsgCount = 0;
+    quickMessages = [];
     const fullLines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
     for (const line of fullLines) {
       try {
@@ -333,13 +556,7 @@ function loadSessionQuick(filePath) {
         const ts = getEntryTimestamp(entry);
         if (!firstTs && ts) firstTs = ts;
         if (ts) lastTs = ts;
-        const userText = extractUserText(entry);
-        if (userText) {
-          userMsgCount++;
-          if (!firstUserMsg) firstUserMsg = userText;
-        }
-        const assistantText = extractAssistantText(entry);
-        if (assistantText) assistantMsgCount++;
+        countMessage(entry);
       } catch (_) { /* ignore */ }
     }
   }
@@ -368,6 +585,9 @@ function loadSessionQuick(filePath) {
     cwd,
     source,
     originator,
+    forkedFromId,
+    threadSource,
+    ancestorIds,
     modelProvider,
     fileSize: stat.size,
     duration: durationStr,
@@ -381,15 +601,19 @@ function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
   const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
 
-  const userMessages = [];
-  const assistantSnippets = [];
+  const conversationMessages = [];
   const toolsUsed = new Set();
-  let totalMessages = 0;
+  let canonicalMetaLoaded = false;
 
   for (const line of lines) {
     try {
       const entry = JSON.parse(line);
-      if (entry.type === 'session_meta') {
+      // Fork rollouts contain inherited session_meta records from their
+      // ancestors. Only the first record describes this file's canonical
+      // thread; applying later records would replace the child UUID with a
+      // parent UUID.
+      if (entry.type === 'session_meta' && !canonicalMetaLoaded) {
+        canonicalMetaLoaded = true;
         const payload = entry.payload || {};
         session.sessionId = payload.id || session.sessionId;
         session.firstTs = payload.timestamp || session.firstTs;
@@ -399,27 +623,28 @@ function loadSessionDetail(session) {
         session.modelProvider = payload.model_provider || session.modelProvider;
         session.source = payload.source || session.source;
         session.originator = payload.originator || session.originator;
+        session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+        session.threadSource = payload.thread_source || session.threadSource || '';
       }
 
-      const userText = extractUserText(entry);
-      if (userText) {
-        totalMessages++;
-        userMessages.push(userText.substring(0, 300));
-      }
-
-      const assistantText = extractAssistantText(entry);
-      if (assistantText) {
-        totalMessages++;
-        assistantSnippets.push(assistantText.substring(0, 400));
-      }
+      appendConversationEntry(conversationMessages, entry);
 
       if (entry.type === 'response_item') {
         const payload = entry.payload || {};
         if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
       }
-      if (entry.type === 'custom-title' && entry.customTitle) session.customTitle = entry.customTitle;
+      const titleUpdate = getCustomTitleUpdate(entry);
+      if (titleUpdate !== null) session.customTitle = titleUpdate;
     } catch (_) { /* ignore */ }
   }
+
+  const userMessages = conversationMessages
+    .filter(message => !message.isTurnBoundary && message.role === 'user')
+    .map(message => message.text.substring(0, 300));
+  const assistantSnippets = conversationMessages
+    .filter(message => !message.isTurnBoundary && message.role === 'assistant')
+    .map(message => message.text.substring(0, 400));
+  const totalMessages = userMessages.length + assistantSnippets.length;
 
   session.userMessages = userMessages;
   session.assistantSnippets = assistantSnippets;
@@ -431,8 +656,127 @@ function loadSessionDetail(session) {
   return session;
 }
 
+function isSearchRelevantLine(line) {
+  // Codex writes the entry and payload types near the beginning of each JSONL
+  // record. Inspecting only that prefix avoids parsing huge tool outputs that
+  // can contain arbitrary JSON-like text of their own.
+  const head = line.substring(0, 4096);
+  if (/"type"\s*:\s*"event_msg"/.test(head)) {
+    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"(?:user_message|agent_message)"/.test(head);
+  }
+  if (/"type"\s*:\s*"response_item"/.test(head)) {
+    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"message"/.test(head);
+  }
+  return false;
+}
+
+function collectSessionSearchEntry(entry, userInputs, finalAnswers) {
+  if (entry.type === 'event_msg') {
+    const payload = entry.payload || {};
+    if (payload.type === 'user_message' && typeof payload.message === 'string') {
+      const text = payload.message.trim();
+      if (text && !isBoilerplateText(text)) userInputs.add(text);
+    }
+    if (payload.type === 'agent_message'
+        && (payload.phase === 'final_answer' || payload.phase == null)
+        && typeof payload.message === 'string') {
+      const text = payload.message.trim();
+      // Before phases were added, agent_message represented the completed
+      // user-facing answer. Keep it as the legacy final-answer fallback.
+      if (text) finalAnswers.add(text);
+    }
+    return;
+  }
+
+  if (entry.type !== 'response_item') return;
+  const payload = entry.payload || {};
+  if (payload.type !== 'message') return;
+
+  if (payload.role === 'user') {
+    const text = extractUserText(entry);
+    if (text) userInputs.add(text);
+  }
+
+  if (payload.role === 'assistant'
+      && (payload.phase === 'final_answer' || payload.phase == null)) {
+    for (const text of extractTextParts(payload.content)) {
+      const trimmed = text.trim();
+      if (trimmed) finalAnswers.add(trimmed);
+    }
+  }
+}
+
+async function buildSessionSearchText(session, options = {}) {
+  const userInputs = new Set();
+  const finalAnswers = new Set();
+  const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
+  // readline buffers one complete JSONL record. That trade-off is intentional:
+  // local transcript records are expected to fit in memory, including the user
+  // and final-answer records that search must retain without truncation.
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+
+  // event_msg/user_message is the canonical record for user input. Keep the
+  // response_item fallback for older or interrupted transcripts that do not
+  // have a matching event_msg entry. The Set removes duplicated records.
+  for await (const line of lines) {
+    if (options.isCancelled && options.isCancelled()) {
+      lines.close();
+      input.destroy();
+      return null;
+    }
+    if (!isSearchRelevantLine(line)) continue;
+    try {
+      const entry = JSON.parse(line);
+      collectSessionSearchEntry(entry, userInputs, finalAnswers);
+    } catch (_) { /* ignore malformed lines */ }
+  }
+
+  return [...userInputs, ...finalAnswers].join('\n').toLowerCase();
+}
+
+function indexSessionsInBackground(sessions, options = {}) {
+  const schedule = options.schedule || setImmediate;
+  const onSessionIndexed = options.onSessionIndexed || (() => {});
+  const onComplete = options.onComplete || (() => {});
+  let nextIndex = 0;
+  let cancelled = false;
+
+  async function indexNextSession() {
+    if (cancelled) return;
+    if (nextIndex >= sessions.length) {
+      onComplete();
+      return;
+    }
+
+    const session = sessions[nextIndex++];
+    try {
+      const searchText = await buildSessionSearchText(session, {
+        isCancelled: () => cancelled,
+      });
+      if (cancelled) return;
+      session.searchText = searchText || '';
+      session._searchIndexError = null;
+    } catch (error) {
+      session.searchText = '';
+      session._searchIndexError = error;
+    }
+    session._searchIndexed = true;
+    onSessionIndexed(session, nextIndex, sessions.length);
+    schedule(indexNextSession);
+  }
+
+  // Always defer the first file so the initial TUI render completes first.
+  schedule(indexNextSession);
+  return () => { cancelled = true; };
+}
+
 function isInteractiveSession(session) {
-  return session.source !== 'exec' && session.originator !== 'codex_exec';
+  const threadSource = typeof session.threadSource === 'string'
+    ? session.threadSource
+    : JSON.stringify(session.threadSource || '');
+  return session.source !== 'exec'
+    && session.originator !== 'codex_exec'
+    && !threadSource.toLowerCase().includes('subagent');
 }
 
 function loadAllSessions() {
@@ -447,6 +791,217 @@ function loadAllSessions() {
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
   return sessions;
+}
+
+function sessionMatchesFilter(session, terms, projectFilter = '', additionalText = '') {
+  if (projectFilter && session.project !== projectFilter) return false;
+  if (terms.length === 0) return true;
+  const metadataHaystack = [
+    session.project,
+    session.topic,
+    session.customTitle || '',
+    session.gitBranch || '',
+    session.sessionId,
+    additionalText,
+  ].join(' ').toLowerCase();
+  const transcriptHaystack = session.searchText || '';
+  return terms.every(term => (
+    metadataHaystack.includes(term) || transcriptHaystack.includes(term)
+  ));
+}
+
+function filterSessionList(sessions, filterText = '', projectFilter = '') {
+  const terms = filterText.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  return sessions.filter(session => sessionMatchesFilter(session, terms, projectFilter));
+}
+
+function sessionTimestamp(session) {
+  const value = new Date(session.lastTs || session.firstTs || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Build a forest of Codex conversations from forked_from_id links.
+ *
+ * A family is intentionally separate from its root session: the root remains
+ * an independently resumable version when the family is expanded.
+ */
+function buildSessionFamilies(sessions) {
+  const sessionById = new Map();
+  const inputIndex = new Map();
+  sessions.forEach((session, index) => {
+    if (!session || !session.sessionId || sessionById.has(session.sessionId)) return;
+    sessionById.set(session.sessionId, session);
+    inputIndex.set(session.sessionId, index);
+  });
+
+  function parentIdFor(session) {
+    const candidates = [session.forkedFromId, ...(session.ancestorIds || [])]
+      .filter(candidate => candidate && candidate !== session.sessionId);
+    const existingParent = candidates.find(candidate => (
+      sessionById.has(candidate)
+    ));
+    // If every ancestor rollout is gone, the oldest known UUID is the stable
+    // key shared by descendants from otherwise different deleted branches.
+    return existingParent || candidates.at(-1) || '';
+  }
+
+  const rootIdFor = new Map();
+  function resolveRootId(startId) {
+    if (rootIdFor.has(startId)) return rootIdFor.get(startId);
+    const pathIds = [];
+    const positions = new Map();
+    let currentId = startId;
+    let rootId = startId;
+
+    while (sessionById.has(currentId)) {
+      if (rootIdFor.has(currentId)) {
+        rootId = rootIdFor.get(currentId);
+        break;
+      }
+      if (positions.has(currentId)) {
+        const cycle = pathIds.slice(positions.get(currentId));
+        rootId = [...cycle].sort()[0] || startId;
+        break;
+      }
+      positions.set(currentId, pathIds.length);
+      pathIds.push(currentId);
+      const parentId = parentIdFor(sessionById.get(currentId));
+      if (!parentId) {
+        rootId = currentId;
+        break;
+      }
+      if (!sessionById.has(parentId)) {
+        // Keep siblings grouped after their common parent rollout is deleted.
+        // The missing UUID remains a stable synthetic family key.
+        rootId = parentId;
+        break;
+      }
+      currentId = parentId;
+    }
+
+    for (const id of pathIds) rootIdFor.set(id, rootId);
+    return rootId;
+  }
+
+  const grouped = new Map();
+  for (const session of sessionById.values()) {
+    const rootId = resolveRootId(session.sessionId);
+    if (!grouped.has(rootId)) grouped.set(rootId, []);
+    grouped.get(rootId).push(session);
+  }
+
+  const families = [];
+  for (const [familyId, members] of grouped) {
+    const memberIds = new Set(members.map(member => member.sessionId));
+    const childrenById = new Map(members.map(member => [member.sessionId, []]));
+    const parentById = new Map();
+    for (const member of members) {
+      const parentId = parentIdFor(member);
+      parentById.set(member.sessionId, parentId);
+      if (parentId && memberIds.has(parentId) && parentId !== member.sessionId) {
+        childrenById.get(parentId).push(member);
+      }
+    }
+    const compareMembers = (a, b) => sessionTimestamp(a) - sessionTimestamp(b)
+      || (inputIndex.get(a.sessionId) || 0) - (inputIndex.get(b.sessionId) || 0)
+      || a.sessionId.localeCompare(b.sessionId);
+    for (const children of childrenById.values()) children.sort(compareMembers);
+    members.sort(compareMembers);
+
+    const leaves = members.filter(member => (childrenById.get(member.sessionId) || []).length === 0);
+    const newest = list => [...list].sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a)
+      || (inputIndex.get(a.sessionId) || 0) - (inputIndex.get(b.sessionId) || 0)
+      || b.sessionId.localeCompare(a.sessionId))[0];
+    const newestLeaf = newest(leaves.length > 0 ? leaves : members);
+    const newestMember = newest(members);
+    // Usually the newest leaf is the desired continuation. If an ancestor was
+    // explicitly resumed after its children, its later activity wins.
+    const defaultSession = sessionTimestamp(newestMember) > sessionTimestamp(newestLeaf)
+      ? newestMember
+      : newestLeaf;
+    const roots = members.filter(member => !memberIds.has(parentById.get(member.sessionId)));
+    const root = sessionById.get(familyId) || roots[0] || members[0];
+
+    families.push({
+      familyId,
+      root,
+      members,
+      childrenById,
+      defaultSession,
+      lastTs: defaultSession.lastTs || defaultSession.firstTs,
+      hasForks: members.length > 1,
+      representativeInputIndex: inputIndex.get(defaultSession.sessionId) || 0,
+    });
+  }
+
+  // The caller pre-sorts sessions for the active sort mode. Rank each family
+  // by the same session its collapsed row displays and resumes.
+  families.sort((a, b) => a.representativeInputIndex - b.representativeInputIndex
+    || sessionTimestamp(b.defaultSession) - sessionTimestamp(a.defaultSession)
+    || a.familyId.localeCompare(b.familyId));
+  return families;
+}
+
+function buildVisibleSessionRows(families, expandedFamilyIds = new Set()) {
+  const rows = [];
+  for (const family of families) {
+    if (!family.hasForks) {
+      rows.push({
+        kind: 'session',
+        key: `session:${family.defaultSession.sessionId}`,
+        family,
+        session: family.defaultSession,
+        depth: 0,
+        treePrefix: '',
+        isDefault: true,
+      });
+      continue;
+    }
+
+    const isExpanded = expandedFamilyIds.has(family.familyId);
+    rows.push({
+      kind: 'family',
+      key: `family:${family.familyId}`,
+      family,
+      session: family.defaultSession,
+      depth: 0,
+      treePrefix: '',
+      isExpanded,
+      isDefault: true,
+    });
+    if (!isExpanded) continue;
+
+    const visited = new Set();
+    function appendMember(member, ancestorHasNext = [], isLast = true) {
+      if (!member || visited.has(member.sessionId)) return;
+      visited.add(member.sessionId);
+      const treePrefix = ancestorHasNext.map(hasNext => (hasNext ? '│  ' : '   ')).join('')
+        + (isLast ? '└─ ' : '├─ ');
+      rows.push({
+        kind: 'session',
+        key: `session:${member.sessionId}`,
+        family,
+        session: member,
+        depth: ancestorHasNext.length + 1,
+        treePrefix,
+        isDefault: member === family.defaultSession,
+        isRoot: member === family.root,
+      });
+      const children = family.childrenById.get(member.sessionId) || [];
+      children.forEach((child, index) => {
+        appendMember(child, [...ancestorHasNext, !isLast], index === children.length - 1);
+      });
+    }
+
+    appendMember(family.root, [], true);
+    // Broken or cyclic input should remain accessible even if it cannot be
+    // reached from the selected root.
+    for (const member of family.members) {
+      if (!visited.has(member.sessionId)) appendMember(member, [], true);
+    }
+  }
+  return rows;
 }
 
 // ─── Formatting Helpers ──────────────────────────────────────────────────────
@@ -522,7 +1077,7 @@ function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp() {
+function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
   const allSessions = loadAllSessions();
   const meta = loadMeta();
 
@@ -535,12 +1090,20 @@ function createApp() {
     }
   }
 
-  let filteredSessions = [...allSessions];
-  let selectedIndex = -1;  // -1 = "New Session", 0+ = session index
+  const expandedFamilyIds = new Set();
+  let allFamilies = buildSessionFamilies(allSessions);
+  let filteredFamilies = [...allFamilies];
+  let displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+  let selectedIndex = -1;  // -1 = "New Session", 0+ = display row index
   let filterText = '';
+  let projectFilter = '';
   let isSearchMode = false;
   let sortMode = 'time';
   let launchModeId = getDefaultLaunchMode(meta);
+  let searchIndexing = allSessions.length > 0;
+  let pendingIndexRefresh = false;
+  let indexRefreshTimer = null;
+  let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
   const uniqueProjects = [...new Set(allSessions.map(s => s.project))];
@@ -554,6 +1117,22 @@ function createApp() {
     fullUnicode: true,
     autoPadding: true,
     dockBorders: true,
+    sendFocus: true,
+  });
+
+  // Terminal focus reporting also covers tmux pane/window selection when
+  // tmux has focus-events enabled. Arm the mouse fallback only after blur so
+  // ordinary TUI clicks never launch synchronous input-source subprocesses.
+  let inputSourceActivationPending = false;
+  screen.on('blur', () => { inputSourceActivationPending = true; });
+  screen.on('focus', () => {
+    inputSourceActivationPending = false;
+    activateInputSource();
+  });
+  screen.on('mousedown', () => {
+    if (!inputSourceActivationPending) return;
+    inputSourceActivationPending = false;
+    activateInputSource();
   });
 
   // Force screen-level fill color so no terminal bg leaks through
@@ -567,17 +1146,20 @@ function createApp() {
 
   function updateHeader() {
     const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`;
-    const count = `{#a3e635-fg}${filteredSessions.length}{/}{#8a8178-fg}/${allSessions.length} sessions{/}`;
+    const count = `{#a3e635-fg}${filteredFamilies.length}{/}{#8a8178-fg}/${allFamilies.length} conversations · ${allSessions.length} versions{/}`;
     const proj = `{#ffd166-fg}${uniqueProjects.length}{/}{#8a8178-fg} projects{/}`;
     const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
     const launchMode = `{#ff5d73-fg}[${getLaunchMode(launchModeId).label}]{/}`;
     const search = isSearchMode
       ? `{#ffb347-fg}/ ${filterText}▌{/}`
       : (filterText ? `{#ffb347-fg}/ ${filterText}{/}` : '');
+    const project = projectFilter ? `{#5ad1e6-fg}[${projectFilter}]{/}` : '';
     let parts = [title, count, proj];
     parts.push(sort);
     parts.push(launchMode);
+    if (project) parts.push(project);
     if (search) parts.push(search);
+    if (searchIndexing) parts.push('{#8a8178-fg}indexing search…{/}');
     header.setContent(`\n ${parts.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
@@ -605,13 +1187,38 @@ function createApp() {
   blessed.line({ parent: screen, top: 4, left: '50%', height: '100%-7', orientation: 'vertical', style: { fg: '#3a3f46', bg: '#141414' } });
 
   // ─── Right Panel ───────────────────────────────────────────────────────
+  // Metadata and resume controls stay fixed while the conversation between
+  // them has its own scroll position.
   const detailPanel = blessed.box({
     parent: screen,
     top: 4, left: '50%+1', width: '50%-1', height: '100%-7',
+    style: { bg: '#141414' },
+  });
+
+  const detailMetaPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-meta',
+    top: 0, left: 0, width: '100%', height: 1,
+    tags: true,
+    style: { bg: '#141414' },
+  });
+
+  const detailMessagesPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-messages',
+    top: 1, left: 0, width: '100%', bottom: 4,
     tags: true, scrollable: true, alwaysScroll: true,
     scrollbar: { ch: '▐', style: { fg: '#8a8178' } },
     style: { bg: '#141414' },
     mouse: true,
+  });
+
+  const detailActionPanel = blessed.box({
+    parent: detailPanel,
+    name: 'detail-action',
+    bottom: 0, left: 0, width: '100%', height: 4,
+    tags: true,
+    style: { bg: '#141414' },
   });
 
   blessed.line({ parent: screen, bottom: 2, left: 0, width: '100%', orientation: 'horizontal', style: { fg: '#3a3f46', bg: '#141414' } });
@@ -636,6 +1243,7 @@ function createApp() {
     const keys = [
         '{#a3e635-fg}{bold}n{/} {#a3e635-fg}New{/}',
         '{#ff7a1a-fg}{bold}↵{/} {#ff7a1a-fg}Resume{/}',
+        '{#ffd166-fg}{bold}←→/hl{/} {#ffd166-fg}Fold{/}',
         '{#ff5d73-fg}{bold}d{/} {#ff5d73-fg}Danger{/}',
         '{#ff5d73-fg}{bold}m{/} {#ff5d73-fg}Mode{/}',
         '{#ffb347-fg}{bold}/{/} {#ffb347-fg}Search{/}',
@@ -653,7 +1261,8 @@ function createApp() {
   function buildListItems() {
     const listW = Math.floor((screen.width || 100) / 2) - 2;
 
-    return filteredSessions.map((session) => {
+    return displayRows.map((row) => {
+      const session = row.session;
       const color = getProjectColor(session.project, projectColorMap);
       const proj = `{${color}-fg}${session.project.substring(0, 14).padEnd(14)}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(18)}{/}`;
@@ -693,64 +1302,191 @@ function createApp() {
   function refreshList() {
     const listW = Math.floor((screen.width || 100) / 2) - 2;
 
-    const sessionItems = filteredSessions.map((session) => {
+    const sessionItems = displayRows.map((row) => {
+      const session = row.session;
       const color = getProjectColor(session.project, projectColorMap);
-      const proj = `{${color}-fg}${session.project.substring(0, 12).padEnd(12)}{/}`;
+      const marker = row.kind === 'family'
+        ? (row.isExpanded ? '▾ ' : '▸ ')
+        : (row.treePrefix || '  ');
+      const markerWidth = row.treePrefix ? row.treePrefix.length : 2;
+      const familyBadge = row.kind === 'family'
+        ? `{#ffd166-fg}[${row.family.members.length}] → Latest{/} {#a3e635-fg}●{/} `
+        : '';
+      const familyBadgeWidth = row.kind === 'family'
+        ? `[${row.family.members.length}] → Latest ● `.length
+        : 0;
+      const compactFamily = row.kind === 'family' && listW < 60;
+      const projectWidth = Math.max(7, 12 - Math.max(0, markerWidth - 2));
+      const proj = `{${color}-fg}${session.project.substring(0, projectWidth).padEnd(projectWidth)}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
 
-      const fixedLen = 12 + 1 + 16 + 1 + 3;
-      const topicMaxLen = Math.max(10, listW - fixedLen);
-      let topic = session.customTitle || session.topic;
+      const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
+      const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
+      const topicMaxLen = Math.max(0, listW - fixedLen);
+      const familyTitle = getFamilyTitleForRow(meta, row);
+      const hasCustomTitle = Boolean(familyTitle || session.customTitle);
+      let topic = familyTitle || session.customTitle || session.topic;
 
-      if (topic.length > topicMaxLen) topic = topic.substring(0, topicMaxLen) + '…';
+      if (topic.length > topicMaxLen) {
+        topic = topicMaxLen > 1 ? topic.substring(0, topicMaxLen - 1) + '…' : '';
+      }
 
-      let label = `${proj} ${time} `;
-      if (session.customTitle) {
+      const versionLabel = row.kind === 'session' && row.family.hasForks
+        ? (row.isRoot ? '{#8a8178-fg}Original{/} ' : '{#8a8178-fg}Fork{/} ')
+        : '';
+      const latest = row.kind === 'session' && row.family.hasForks && row.isDefault
+        ? ' {#a3e635-fg}●{/}'
+        : '';
+      const metadata = compactFamily ? '' : `${proj} ${time} `;
+      let label = `{#8a8178-fg}${marker}{/}${familyBadge}${metadata}${versionLabel}`;
+      if (hasCustomTitle) {
         label += `{#5bd1b9-fg}{bold}${esc(topic)}{/}`;
       } else {
         label += `{#e7dccf-fg}${esc(topic)}{/}`;
       }
+      label += latest;
 
       return label;
     });
 
     const items = [NEW_SESSION_LABEL, ...sessionItems];
 
+    suppressSelectEvent = true;
     listPanel.setItems(items);
     listPanel.select(selectedIndex + 1);  // +1 because index 0 is "New Session"
+    suppressSelectEvent = false;
     screen.render();
   }
 
   // ─── Render Detail Panel ───────────────────────────────────────────────
+  let currentMetaContent = '';
+  let currentMessagesContent = '';
+  let currentActionContent = '';
+  let detailUsesUnifiedScroll = false;
+  let unifiedMetaHeight = 0;
+  let currentDetailKey = null;
+
+  function layoutDetailPanels() {
+    detailMetaPanel.parseContent();
+    detailActionPanel.parseContent();
+
+    const requestedMetaHeight = currentMetaContent
+      ? detailMetaPanel.getScreenLines().length
+      : 0;
+    const requestedActionHeight = currentActionContent
+      ? detailActionPanel.getScreenLines().length
+      : 0;
+    const previousMessagesContent = detailMessagesPanel.content;
+    const previousMessageBase = detailMessagesPanel.childBase || 0;
+    const previousMessageOffset = detailMessagesPanel.childOffset || 0;
+    detailMessagesPanel.setContent(currentMetaContent);
+    const requestedUnifiedMetaHeight = currentMetaContent
+      ? detailMessagesPanel.getScreenLines().length
+      : 0;
+    detailMessagesPanel.setContent(previousMessagesContent);
+    detailMessagesPanel.childBase = previousMessageBase;
+    detailMessagesPanel.childOffset = previousMessageOffset;
+
+    const availableHeight = Math.max(
+      1,
+      Number(detailPanel.height) || Math.max(1, (screen.height || 24) - 7),
+    );
+    const useUnifiedScroll = requestedMetaHeight + requestedActionHeight + 1 > availableHeight;
+    const messagesContent = useUnifiedScroll
+      ? [currentMetaContent, currentMessagesContent, currentActionContent].filter(Boolean).join('\n')
+      : currentMessagesContent;
+
+    const messagesChanged = detailMessagesPanel.content !== messagesContent;
+    let nextMessageBase = previousMessageBase;
+    if (messagesChanged) detailMessagesPanel.setContent(messagesContent);
+
+    if (useUnifiedScroll !== detailUsesUnifiedScroll) {
+      nextMessageBase += useUnifiedScroll ? requestedUnifiedMetaHeight : -unifiedMetaHeight;
+    } else if (useUnifiedScroll) {
+      nextMessageBase += requestedUnifiedMetaHeight - unifiedMetaHeight;
+    } else if (messagesChanged) {
+      nextMessageBase = 0;
+    }
+
+    detailMessagesPanel.childBase = nextMessageBase;
+    detailMessagesPanel.childOffset = 0;
+    detailUsesUnifiedScroll = useUnifiedScroll;
+    unifiedMetaHeight = useUnifiedScroll ? requestedUnifiedMetaHeight : 0;
+
+    if (useUnifiedScroll) {
+      detailMetaPanel.height = 0;
+      detailMessagesPanel.top = 0;
+      detailMessagesPanel.bottom = 0;
+      detailActionPanel.height = 0;
+    } else {
+      detailMetaPanel.height = requestedMetaHeight;
+      detailMessagesPanel.top = requestedMetaHeight;
+      detailMessagesPanel.bottom = requestedActionHeight;
+      detailActionPanel.height = requestedActionHeight;
+    }
+
+    // childBase is the actual rendered viewport. getScroll()/setScroll() also
+    // include childOffset and are not idempotent when alwaysScroll is enabled.
+    detailMessagesPanel.parseContent();
+    const visibleMessages = useUnifiedScroll
+      ? availableHeight
+      : availableHeight - requestedMetaHeight - requestedActionHeight;
+    const maxMessageBase = Math.max(
+      0,
+      detailMessagesPanel.getScreenLines().length - visibleMessages,
+    );
+    detailMessagesPanel.childBase = Math.max(
+      0,
+      Math.min(detailMessagesPanel.childBase || 0, maxMessageBase),
+    );
+    detailMessagesPanel.childOffset = 0;
+  }
+
+  function setDetailContent(metaContent, messagesContent, actionContent, detailKey = null) {
+    const detailChanged = detailKey !== currentDetailKey;
+    currentMetaContent = metaContent;
+    currentMessagesContent = messagesContent;
+    currentActionContent = actionContent;
+    detailMetaPanel.setContent(metaContent);
+    detailActionPanel.setContent(actionContent);
+    layoutDetailPanels();
+    if (detailChanged) detailMessagesPanel.setScroll(0);
+    currentDetailKey = detailKey;
+  }
+
+  screen.on('resize', () => {
+    layoutDetailPanels();
+    screen.render();
+  });
+
   function renderDetail() {
     if (selectedIndex === -1) {
       const cli = CLI.name;
       const launchMode = getLaunchMode(launchModeId);
       const launchCommand = buildCodexCommand({ modeId: launchModeId });
-      let c = '';
-      c += `\n {#a3e635-fg}{bold}Start a New Conversation{/}\n`;
-      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n\n`;
-      c += ` {#e7dccf-fg}Open a fresh Codex session and start{/}\n`;
-      c += ` {#e7dccf-fg}working in the current directory.{/}\n\n`;
-      c += ` {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}\n`;
-      c += ` {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}\n`;
-      c += ` {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}\n`;
-      c += ` {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}\n\n`;
-      c += ` {#8a8178-fg}${launchMode.description}{/}\n\n`;
-      c += ` {#3a3f46-fg}${'─'.repeat(44)}{/}\n`;
-      c += ` {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}\n`;
-      c += ` {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}\n`;
-      detailPanel.setContent(c);
-      detailPanel.setScroll(0);
+      const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
+      const metaContent = ` {#a3e635-fg}{bold}Start a New Conversation{/}\n${sep}`
+        + `\n {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}`
+        + `\n {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}`
+        + `\n {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}`
+        + `\n {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}`;
+      const messagesContent = `\n {#e7dccf-fg}Open a fresh Codex session and start{/}`
+        + `\n {#e7dccf-fg}working in the current directory.{/}`
+        + `\n\n {#8a8178-fg}${launchMode.description}{/}`;
+      const actionContent = `${sep}`
+        + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} or {/}{#a3e635-fg}{bold}n{/}{#a3e635-fg} to launch{/}`
+        + `\n {#ff5d73-fg}{bold}m{/}{#ff5d73-fg} to change startup mode{/}`;
+      setDetailContent(metaContent, messagesContent, actionContent, 'new-session');
       return;
     }
 
-    if (filteredSessions.length === 0 || !filteredSessions[selectedIndex]) {
-      detailPanel.setContent('\n  {#8a8178-fg}No session selected{/}');
+    if (displayRows.length === 0 || !displayRows[selectedIndex]) {
+      setDetailContent('', '\n  {#8a8178-fg}No session selected{/}', '', 'no-selection');
       return;
     }
 
-    const session = filteredSessions[selectedIndex];
+    const selectedRow = displayRows[selectedIndex];
+    const session = selectedRow.session;
     loadSessionDetail(session);
     const launchMode = getLaunchMode(launchModeId);
     const resumeCommand = buildCodexCommand({ sessionId: session.sessionId, modeId: launchModeId });
@@ -760,15 +1496,17 @@ function createApp() {
     if (sm && sm.customTitle) session.customTitle = sm.customTitle;
 
     const color = getProjectColor(session.project, projectColorMap);
-    let c = '';
+    let metaContent = '';
     const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
+    const familyTitle = getFamilyTitleForRow(meta, selectedRow);
+    const selectedTitle = familyTitle || session.customTitle || '';
 
     // Title
-    c += `\n {${color}-fg}{bold}█ ${session.project}{/}\n`;
-    if (session.customTitle) {
-      c += ` {#5bd1b9-fg}{bold}${esc(session.customTitle)}{/}\n`;
+    metaContent += ` {${color}-fg}{bold}█ ${session.project}{/}\n`;
+    if (selectedTitle) {
+      metaContent += ` {#5bd1b9-fg}{bold}${esc(selectedTitle)}{/}\n`;
     }
-    c += sep + '\n\n';
+    metaContent += sep + '\n\n';
 
     const fields = [
       ['Session', `{#5ad1e6-fg}${session.sessionId}{/}`],
@@ -778,6 +1516,14 @@ function createApp() {
       ['Messages', `{#ff7a1a-fg}${session.totalMessages || session.estimatedMessages}{/}`],
       ['Size', `{#ffd166-fg}${formatFileSize(session.fileSize)}{/}`],
     ];
+    if (selectedRow.family.hasForks) {
+      const versionIndex = selectedRow.family.members.indexOf(session) + 1;
+      const familyValue = selectedRow.kind === 'family'
+        ? `${selectedRow.family.members.length} versions · Enter resumes latest`
+        : `version ${versionIndex}/${selectedRow.family.members.length}${selectedRow.isDefault ? ' · latest' : ''}`;
+      fields.splice(1, 0, ['Family', `{#ffd166-fg}${familyValue}{/}`]);
+      if (session.forkedFromId) fields.splice(2, 0, ['Forked from', `{#8a8178-fg}${session.forkedFromId}{/}`]);
+    }
     if (session.gitBranch) fields.push(['Branch', `{#5bd1b9-fg} ${session.gitBranch}{/}`]);
     if (session.version) fields.push(['Codex', `{#8a8178-fg}v${session.version}{/}`]);
     if (session.cwd) fields.push(['Directory', `{#8a8178-fg}${session.cwd}{/}`]);
@@ -786,46 +1532,46 @@ function createApp() {
     fields.push(['Resume with', `{#ff5d73-fg}${launchMode.label}{/}`]);
 
     for (const [label, value] of fields) {
-      c += ` {#8a8178-fg}${label.padEnd(12)}{/} ${value}\n`;
+      metaContent += ` {#8a8178-fg}${label.padEnd(12)}{/} ${value}\n`;
     }
 
     if (session.toolsUsed && session.toolsUsed.length > 0) {
-      c += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
+      metaContent += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
       const chips = session.toolsUsed.slice(0, 10).map(t => `{#3a3f46-fg}[{/}{#5ad1e6-fg}${t}{/}{#3a3f46-fg}]{/}`).join(' ');
-      c += ` ${chips}\n`;
-      if (session.toolsUsed.length > 10) c += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
+      metaContent += ` ${chips}\n`;
+      if (session.toolsUsed.length > 10) metaContent += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
     }
 
-    c += `\n {#ffd166-fg}{bold}Conversation{/}\n`;
-    c += sep + '\n';
+    metaContent += `\n {#ffd166-fg}{bold}Conversation{/}\n`;
+    metaContent += sep;
 
-    const detailHeight = detailPanel.height || screen.height || 24;
-    const previewLimit = Math.max(10, Math.floor(Math.max(0, detailHeight - 18) / 3));
-    const msgs = (session.userMessages || []).slice(0, previewLimit);
-    const assists = (session.assistantSnippets || []);
+    const messages = session.userMessages || [];
+    const assists = session.assistantSnippets || [];
+    let messagesContent = '';
 
-    if (msgs.length === 0) {
-      c += `\n  {#8a8178-fg}(no readable messages){/}\n`;
+    if (messages.length === 0) {
+      messagesContent = `\n  {#8a8178-fg}(no readable messages){/}`;
     } else {
-      msgs.forEach((msg, i) => {
-        const clean = esc(msg.replace(/\n/g, ' ').trim());
+      messages.forEach((message, index) => {
+        const clean = esc(message.replace(/\n/g, ' ').trim());
         const trunc = clean.length > 80 ? clean.substring(0, 80) + '…' : clean;
-        c += `\n {#ff7a1a-fg}{bold}You >{/} ${trunc}\n`;
-        if (assists[i]) {
-          const aClean = esc(assists[i].replace(/\n/g, ' ').trim());
+        // Keep each Codex response visually attached to its user turn while
+        // preserving a blank line between consecutive turns.
+        messagesContent += `${messagesContent ? '\n' : ''}\n {#ff7a1a-fg}{bold}You >{/} ${trunc}`;
+        if (assists[index]) {
+          const aClean = esc(assists[index].replace(/\n/g, ' ').trim());
           const aTrunc = aClean.length > 80 ? aClean.substring(0, 80) + '…' : aClean;
-          c += ` {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}\n`;
+          messagesContent += `\n {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}`;
         }
       });
     }
 
-    c += `\n${sep}`;
-    c += `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`;
-    c += `\n {#8a8178-fg}${resumeCommand}{/}\n`;
-    c += ` {#8a8178-fg}${launchMode.description}{/}\n`;
+    const actionContent = `${sep}`
+      + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`
+      + `\n {#8a8178-fg}${resumeCommand}{/}`
+      + `\n {#8a8178-fg}${launchMode.description}{/}`;
 
-    detailPanel.setContent(c);
-    detailPanel.setScroll(0);
+    setDetailContent(metaContent, messagesContent, actionContent, session.sessionId);
   }
 
   // ─── Render All ────────────────────────────────────────────────────────
@@ -839,26 +1585,81 @@ function createApp() {
   }
 
   // ─── Filter ────────────────────────────────────────────────────────────
-  function applyFilter() {
-    if (!filterText) {
-      filteredSessions = [...allSessions];
+  function applyFilter(options = {}) {
+    const hadFilteredResults = displayRows.length > 0;
+    const previousChildBase = listPanel.childBase;
+    const selectedRowKey = options.preserveSelection && selectedIndex >= 0
+        && displayRows[selectedIndex]
+      ? displayRows[selectedIndex].key
+      : null;
+    const terms = filterText.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    allFamilies = buildSessionFamilies(allSessions);
+    // Product decision: matching any version includes its family, while the
+    // collapsed family row always stays pinned to Latest. Expand it to resume
+    // the exact historical version that matched.
+    filteredFamilies = allFamilies.filter(family => {
+      const familyTitle = getFamilyMeta(meta, family.familyId).customTitle || '';
+      return family.members.some(member => (
+        sessionMatchesFilter(member, terms, projectFilter, familyTitle)
+      ));
+    });
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    const preservedIndex = selectedRowKey
+      ? displayRows.findIndex(row => row.key === selectedRowKey)
+      : -1;
+    if (preservedIndex !== -1) {
+      selectedIndex = preservedIndex;
     } else {
-      const terms = filterText.toLowerCase().split(/\s+/);
-      filteredSessions = allSessions.filter(s => {
-        const haystack = [s.project, s.topic, s.customTitle || '', s.gitBranch || '', s.sessionId, ...(s.userMessages || [])].join(' ').toLowerCase();
-
-        return terms.every(t => {
-          return haystack.includes(t);
-        });
-      });
+      selectedIndex = Math.min(selectedIndex, Math.max(-1, displayRows.length - 1));
     }
-    selectedIndex = Math.min(selectedIndex, Math.max(-1, filteredSessions.length - 1));
-    // When filtering, select first result; when clearing, select New Session
-    if (filterText && filteredSessions.length > 0) {
+    // User-driven filtering selects the first result. Background refreshes
+    // preserve the current session so completion cannot move the highlight.
+    if (!options.preserveSelection && (filterText || projectFilter) && displayRows.length > 0) {
+      selectedIndex = 0;
+    } else if (options.preserveSelection && !hadFilteredResults
+        && (filterText || projectFilter) && displayRows.length > 0) {
+      // If indexing produced the first match for an active query, move off the
+      // New Conversation row so Enter resumes the newly visible result.
       selectedIndex = 0;
     }
-    listPanel.childBase = 0;  // reset scroll to top
+    if (options.preserveSelection) {
+      const visibleRows = Math.max(1, listPanel.height || 1);
+      const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
+      const selectedRow = selectedIndex + 1;
+      let nextBase = Math.min(previousChildBase, maxBase);
+      if (selectedRow < nextBase) nextBase = selectedRow;
+      if (selectedRow >= nextBase + visibleRows) nextBase = selectedRow - visibleRows + 1;
+      listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+    } else {
+      listPanel.childBase = 0;
+    }
     renderAll();
+  }
+
+  function applyPendingIndexRefresh() {
+    if (!pendingIndexRefresh || popupOpen || renameMode) return false;
+    pendingIndexRefresh = false;
+    applyFilter({ preserveSelection: true });
+    return true;
+  }
+
+  function refreshIndexedSearchResults() {
+    if (!filterText && !projectFilter) return;
+    if (popupOpen || renameMode) {
+      pendingIndexRefresh = true;
+    } else {
+      applyFilter({ preserveSelection: true });
+    }
+  }
+
+  function scheduleIndexRefresh() {
+    if ((!filterText && !projectFilter) || indexRefreshTimer) return;
+    // Throttle rather than debounce so a continuously running index cannot
+    // postpone visible search results until every transcript has finished.
+    indexRefreshTimer = setTimeout(() => {
+      indexRefreshTimer = null;
+      refreshIndexedSearchResults();
+    }, 50);
   }
 
   // ─── Sort ──────────────────────────────────────────────────────────────
@@ -904,10 +1705,14 @@ function createApp() {
     popupOpen = true;
     popup.focus(); screen.render();
     popup.on('select', (item, index) => {
-      filterText = index === 0 ? '' : uniqueProjects[index - 1];
+      projectFilter = index === 0 ? '' : uniqueProjects[index - 1];
+      pendingIndexRefresh = false;
       popup.destroy(); popupOpen = false; selectedIndex = 0; applyFilter();
     });
-    popup.key(['escape', 'q'], () => { popup.destroy(); popupOpen = false; screen.render(); });
+    popup.key(['escape', 'q'], () => {
+      popup.destroy(); popupOpen = false;
+      if (!applyPendingIndexRefresh()) screen.render();
+    });
   }
 
   // ─── Key Bindings ──────────────────────────────────────────────────────
@@ -931,8 +1736,8 @@ function createApp() {
 
   function moveSelection(delta) {
     const newIdx = selectedIndex + delta;
-    // -1 = New Session, 0..length-1 = sessions
-    if (newIdx >= -1 && newIdx < filteredSessions.length) {
+    // -1 = New Session, 0..length-1 = visible conversation rows
+    if (newIdx >= -1 && newIdx < displayRows.length) {
       selectedIndex = newIdx;
       const listIdx = selectedIndex + 1;  // list index (0 = New Session row)
       suppressSelectEvent = true;
@@ -964,6 +1769,36 @@ function createApp() {
     if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
     moveSelection(-1);
   });
+  function expandSelectedFamily() {
+    if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
+    const row = displayRows[selectedIndex];
+    if (!row || row.kind !== 'family' || row.isExpanded) return;
+    expandedFamilyIds.add(row.family.familyId);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    selectedIndex = displayRows.findIndex(candidate => candidate.key === row.key);
+    renderAll();
+  }
+  function collapseSelectedFamily() {
+    if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
+    const row = displayRows[selectedIndex];
+    if (!row || !row.family.hasForks || !expandedFamilyIds.has(row.family.familyId)) return;
+    const familyKey = `family:${row.family.familyId}`;
+    expandedFamilyIds.delete(row.family.familyId);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    selectedIndex = displayRows.findIndex(candidate => candidate.key === familyKey);
+    const visibleRows = Math.max(1, listPanel.height || 1);
+    const selectedListIndex = selectedIndex + 1;
+    const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
+    let nextBase = Math.min(listPanel.childBase, maxBase);
+    if (selectedListIndex < nextBase) nextBase = selectedListIndex;
+    if (selectedListIndex >= nextBase + visibleRows) {
+      nextBase = selectedListIndex - visibleRows + 1;
+    }
+    listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+    renderAll();
+  }
+  screen.key(['right'], expandSelectedFamily);
+  screen.key(['left'], collapseSelectedFamily);
   screen.key(['home'], () => {
     if (renameMode || popupOpen) return;
     if (isSearchMode) { isSearchMode = false; }
@@ -975,7 +1810,7 @@ function createApp() {
   screen.key(['end'], () => {
     if (renameMode || popupOpen) return;
     if (isSearchMode) { isSearchMode = false; }
-    selectedIndex = Math.max(0, filteredSessions.length - 1);
+    selectedIndex = displayRows.length > 0 ? displayRows.length - 1 : -1;
     suppressSelectEvent = true; listPanel.select(selectedIndex + 1); suppressSelectEvent = false;
     listPanel.childBase = Math.max(0, selectedIndex + 1 - listPanel.height + 1);
     renderDetail(); updateHeader(); screen.render();
@@ -1003,16 +1838,16 @@ function createApp() {
     // ── Rename mode: capture all input ──
     if (renameMode) {
       if (key.name === 'return' || key.name === 'enter') {
-        const session = renameSession;
+        const target = renameTarget;
         const value = renameValue;
         closeRename();
-        submitRename(session, value);
+        submitRename(target, value);
         return;
       }
       if (key.name === 'escape') {
         closeRename();
         listPanel.focus();
-        screen.render();
+        if (!applyPendingIndexRefresh()) screen.render();
         return;
       }
       if (key.name === 'backspace') {
@@ -1027,6 +1862,23 @@ function createApp() {
         renderRenameInput();
       }
       return;  // swallow all keys while in rename mode
+    }
+
+    // Focused popups own Escape. The screen-level keypress still fires first,
+    // so leave the filter state untouched and let the popup close itself.
+    if (key.name === 'escape') {
+      if (popupOpen) return;
+      if (isSearchMode) {
+        isSearchMode = false;
+        filterText = '';
+        applyFilter();
+        return;
+      }
+      filterText = '';
+      projectFilter = '';
+      selectedIndex = -1;
+      applyFilter();
+      return;
     }
 
     // Backspace: delete search char, or exit search mode if empty
@@ -1047,8 +1899,10 @@ function createApp() {
     if (!isSearchMode && !popupOpen) {
       if (ch === 'j') { moveSelection(1); return; }
       if (ch === 'k') { moveSelection(-1); return; }
+      if (ch === 'l') { expandSelectedFamily(); return; }
+      if (ch === 'h') { collapseSelectedFamily(); return; }
       if (ch === 'G') {
-        selectedIndex = Math.max(0, filteredSessions.length - 1);
+        selectedIndex = displayRows.length > 0 ? displayRows.length - 1 : -1;
         suppressSelectEvent = true; listPanel.select(selectedIndex + 1); suppressSelectEvent = false;
         listPanel.childBase = Math.max(0, selectedIndex + 1 - listPanel.height + 1);
         renderDetail(); updateHeader(); screen.render();
@@ -1065,7 +1919,6 @@ function createApp() {
 
     if (!isSearchMode) return;
     if (key.name === 'return' || key.name === 'enter') { isSearchMode = false; searchJustConfirmed = true; renderAll(); return; }
-    if (key.name === 'escape') { isSearchMode = false; filterText = ''; applyFilter(); return; }
     // Only accept printable characters (exclude control chars like \r \n \t)
     if (ch && ch.length === 1 && ch.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) { filterText += ch; selectedIndex = -1; applyFilter(); }
   });
@@ -1073,6 +1926,7 @@ function createApp() {
   // ─── Resume Session ─────────────────────────────────────────────────────
 
   function resumeSession(session, overrideModeId = null) {
+    cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -1099,6 +1953,7 @@ function createApp() {
   }
 
   function startNewSession(overrideModeId = null) {
+    cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -1143,8 +1998,8 @@ function createApp() {
     if (isSearchMode) { isSearchMode = false; renderAll(); return; }
     if (popupOpen) return;
     if (selectedIndex === -1) { startNewSession(); return; }
-    if (filteredSessions.length === 0) return;
-    resumeSession(filteredSessions[selectedIndex]);
+    if (displayRows.length === 0 || selectedIndex < 0) return;
+    resumeSession(displayRows[selectedIndex].session);
   });
 
   // Quick shortcut: n = new session
@@ -1156,8 +2011,8 @@ function createApp() {
   // Copy session ID
   screen.key(['c'], () => {
     if (renameMode || isSearchMode) return;
-    if (filteredSessions.length === 0) return;
-    const sid = filteredSessions[selectedIndex].sessionId;
+    if (displayRows.length === 0 || selectedIndex < 0) return;
+    const sid = displayRows[selectedIndex].session.sessionId;
     try {
       if (!copyToClipboard(sid)) throw new Error('clipboard unavailable');
       footer.setContent(`\n  {#a3e635-fg}{bold}✓ Copied:{/} {#5ad1e6-fg}${sid}{/}`);
@@ -1174,13 +2029,15 @@ function createApp() {
   screen.key(['d'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
     if (selectedIndex === -1) { startNewSession('danger'); return; }
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    resumeSession(filteredSessions[selectedIndex], 'danger');
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    resumeSession(displayRows[selectedIndex].session, 'danger');
   });
 
   // ─── Delete Session ───────────────────────────────────────────────────
   function deleteSession(session) {
     try {
+      const deletedFamily = buildSessionFamilies(allSessions)
+        .find(family => family.members.some(member => member.sessionId === session.sessionId));
       // Delete the .jsonl file
       if (fs.existsSync(session.filePath)) {
         fs.unlinkSync(session.filePath);
@@ -1188,16 +2045,16 @@ function createApp() {
       // Clean up meta entry
       if (meta.sessions[session.sessionId]) {
         delete meta.sessions[session.sessionId];
-        saveMeta(meta);
       }
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
-      const filtIdx = filteredSessions.indexOf(session);
-      if (filtIdx !== -1) filteredSessions.splice(filtIdx, 1);
-      // Adjust selection
-      if (selectedIndex >= filteredSessions.length) {
-        selectedIndex = Math.max(-1, filteredSessions.length - 1);
+      reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
+      saveMeta(meta);
+      // Adjust selection. Family and visible-row state is rebuilt by the
+      // caller so deleting one version can reveal a singleton family.
+      if (selectedIndex >= displayRows.length) {
+        selectedIndex = Math.max(-1, displayRows.length - 1);
       }
     } catch (e) { /* silently fail */ }
   }
@@ -1227,20 +2084,28 @@ function createApp() {
       popupOpen = false;
       deleteSession(session);
       footer.setContent(`\n  {#ff5d73-fg}{bold}✗ Deleted:{/} {#8a8178-fg}${session.sessionId}{/}`);
-      renderAll();
+      pendingIndexRefresh = false;
+      applyFilter({ preserveSelection: true });
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);
     });
     confirmPopup.key(['n', 'escape', 'q'], () => {
       confirmPopup.destroy();
       popupOpen = false;
-      screen.render();
+      if (!applyPendingIndexRefresh()) screen.render();
     });
   }
 
   screen.key(['x', 'delete'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    showDeleteConfirm(filteredSessions[selectedIndex]);
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    const row = displayRows[selectedIndex];
+    if (row.kind === 'family') {
+      footer.setContent('\n  {#ffd166-fg}{bold}Expand this conversation first{/}{#8a8178-fg} to choose a version to delete{/}');
+      screen.render();
+      setTimeout(() => { updateFooter(); screen.render(); }, 1800);
+      return;
+    }
+    showDeleteConfirm(row.session);
   });
 
   // ─── Rename Session ───────────────────────────────────────────────────
@@ -1248,7 +2113,7 @@ function createApp() {
   let renameMode = false;
   let renameJustFinished = false;
   let renameValue = '';
-  let renameSession = null;
+  let renameTarget = null;
   let renamePopup = null;
   let renameDisplay = null;
   const renameMaxWidth = 46;
@@ -1262,14 +2127,17 @@ function createApp() {
     screen.render();
   }
 
-  function showRenameInput(session) {
-    renameSession = session;
-    renameValue = session.customTitle || '';
+  function showRenameInput(row) {
+    renameTarget = row;
+    const isFamily = rowTargetsFamilyTitle(meta, row);
+    renameValue = isFamily
+      ? getFamilyMeta(meta, row.family.familyId).customTitle || ''
+      : row.session.customTitle || '';
 
     renamePopup = blessed.box({
       parent: screen, top: 'center', left: 'center',
       width: 52, height: 7,
-      label: ' {bold}{#5bd1b9-fg}Rename Session{/} ',
+      label: ` {bold}{#5bd1b9-fg}Rename ${isFamily ? 'Conversation' : 'Version'}{/} `,
       tags: true, border: { type: 'line' },
       style: {
         border: { fg: '#5bd1b9' }, bg: '#1d1f24', fg: '#e7dccf',
@@ -1301,31 +2169,45 @@ function createApp() {
     renameMode = false;
     if (renamePopup) { renamePopup.destroy(); renamePopup = null; }
     popupOpen = false;
-    renameSession = null;
+    renameTarget = null;
     renameDisplay = null;
   }
 
-  function submitRename(session, newTitle) {
+  function submitRename(row, newTitle) {
+    if (!row) return;
     newTitle = (newTitle || '').trim();
+    const session = row.session;
 
-    // Save to meta
-    if (!meta.sessions[session.sessionId]) meta.sessions[session.sessionId] = {};
-    meta.sessions[session.sessionId].customTitle = newTitle || undefined;
-    if (!newTitle) delete meta.sessions[session.sessionId].customTitle;
+    if (rowTargetsFamilyTitle(meta, row)) {
+      if (!meta.families) meta.families = {};
+      if (newTitle) {
+        meta.families[row.family.familyId] = { customTitle: newTitle };
+      } else {
+        delete meta.families[row.family.familyId];
+        if (Object.keys(meta.families).length === 0) delete meta.families;
+      }
+    } else {
+      if (!meta.sessions[session.sessionId]) meta.sessions[session.sessionId] = {};
+      meta.sessions[session.sessionId].customTitle = newTitle || undefined;
+      if (!newTitle) delete meta.sessions[session.sessionId].customTitle;
+
+      // Version titles are also written to their rollout. Family titles stay
+      // local because no single JSONL file represents the whole family.
+      session.customTitle = newTitle;
+      if (fs.existsSync(session.filePath)) {
+        try {
+          const entry = JSON.stringify({ type: 'custom-title', customTitle: newTitle });
+          fs.appendFileSync(session.filePath, '\n' + entry);
+        } catch (e) { /* silently fail */ }
+      }
+    }
     saveMeta(meta);
 
-    // Update in-memory session
-    session.customTitle = newTitle;
-
-    // Also append to JSONL so the title survives future resumes
-    if (newTitle && fs.existsSync(session.filePath)) {
-      try {
-        const entry = JSON.stringify({ type: 'custom-title', customTitle: newTitle });
-        fs.appendFileSync(session.filePath, '\n' + entry);
-      } catch (e) { /* silently fail */ }
+    if (filterText || projectFilter) {
+      applyFilter({ preserveSelection: true });
+    } else {
+      renderAll();
     }
-
-    renderAll();
 
     // Ask whether to resume this session after rename
     // We use renameJustFinished flag to prevent the Enter key from rename
@@ -1356,26 +2238,34 @@ function createApp() {
         renameConfirmPopup = null;
         renameConfirmSession = null;
         popupOpen = false;
-        renderAll();
+        if (!applyPendingIndexRefresh()) renderAll();
       });
     }, 50);
   }
 
   screen.key(['r'], () => {
     if (isSearchMode || popupOpen) return;
-    if (selectedIndex < 0 || selectedIndex >= filteredSessions.length) return;
-    showRenameInput(filteredSessions[selectedIndex]);
+    if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    showRenameInput(displayRows[selectedIndex]);
   });
 
   screen.key(['m'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleLaunchMode(); });
-  screen.key(['s'], () => { if (!renameMode && !isSearchMode) cycleSort(); });
-  screen.key(['p'], () => { if (!renameMode && !isSearchMode) showProjectPicker(); });
-  screen.key(['escape'], () => {
-    if (renameMode) return;  // handled in keypress
-    if (isSearchMode) { isSearchMode = false; filterText = ''; applyFilter(); return; }
-    filterText = ''; selectedIndex = -1; applyFilter();
+  screen.key(['s'], () => { if (!renameMode && !isSearchMode && !popupOpen) cycleSort(); });
+  screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
+  function quitApp() {
+    cancelSearchIndexing();
+    process.stdout.write('\x1b[0m');
+    screen.destroy();
+    process.exit(0);
+  }
+  screen.key(['q'], () => {
+    if (renameMode || popupOpen) return;
+    quitApp();
   });
-  screen.key(['q', 'C-c'], () => { if (renameMode) return; process.stdout.write('\x1b[0m'); screen.destroy(); process.exit(0); });
+  screen.key(['C-c'], () => {
+    if (renameMode) return;
+    quitApp();
+  });
 
   // Remove blessed's built-in wheel handlers (they call select which changes selection)
   listPanel.removeAllListeners('element wheeldown');
@@ -1413,13 +2303,39 @@ function createApp() {
     }
   });
 
-  // Mouse wheel on detail
-  detailPanel.on('wheeldown', () => { detailPanel.scroll(2); screen.render(); });
-  detailPanel.on('wheelup', () => { detailPanel.scroll(-2); screen.render(); });
+  // Only the conversation viewport scrolls; metadata and resume controls are
+  // separate fixed panels.
+  detailMessagesPanel.removeAllListeners('wheeldown');
+  detailMessagesPanel.removeAllListeners('wheelup');
+  detailMessagesPanel.on('wheeldown', () => { detailMessagesPanel.scroll(2); screen.render(); });
+  detailMessagesPanel.on('wheelup', () => { detailMessagesPanel.scroll(-2); screen.render(); });
 
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
+  const cancelBackgroundIndexing = indexSessionsInBackground([...allSessions], {
+    onSessionIndexed: scheduleIndexRefresh,
+    onComplete: () => {
+      searchIndexing = false;
+      if (indexRefreshTimer) {
+        clearTimeout(indexRefreshTimer);
+        indexRefreshTimer = null;
+      }
+      if (filterText || projectFilter) {
+        refreshIndexedSearchResults();
+      } else {
+        updateHeader();
+        screen.render();
+      }
+    },
+  });
+  cancelSearchIndexing = () => {
+    cancelBackgroundIndexing();
+    if (indexRefreshTimer) {
+      clearTimeout(indexRefreshTimer);
+      indexRefreshTimer = null;
+    }
+  };
 }
 
 // ─── Exports for Testing ────────────────────────────────────────────────────
@@ -1433,8 +2349,16 @@ if (typeof module !== 'undefined') {
     extractUserText,
     loadSessionQuick,
     loadSessionDetail,
+    buildSessionSearchText,
+    indexSessionsInBackground,
     isInteractiveSession,
     loadAllSessions,
+    filterSessionList,
+    buildSessionFamilies,
+    buildVisibleSessionRows,
+    getFamilyTitleForRow,
+    rowTargetsFamilyTitle,
+    reconcileFamilyMetaAfterDelete,
     // Formatting
     formatTimestamp,
     formatFileSize,
@@ -1457,6 +2381,8 @@ if (typeof module !== 'undefined') {
     getShellCommand,
     getLaunchMode,
     buildCodexCommand,
+    switchToAbcInputSource,
+    createInputSourceActivator,
     // List mode (for integration tests)
     runListMode,
     // TUI (for interaction tests)
@@ -1486,10 +2412,11 @@ if (require.main === module) {
     console.log(`\n${C.cyan}🔄 Checking for updates…${C.reset}\n`);
 
     try {
-      const latest = execSync('npm view codex-starter version 2>/dev/null', {
+      const latest = JSON.parse(execSync('npm view codex-starter version --json 2>/dev/null', {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 10000,
-      }).toString().trim();
+        cwd: __dirname,
+      }).toString());
 
       if (latest === PKG.version) {
         console.log(`${C.green}✓ Already on the latest version (v${PKG.version})${C.reset}\n`);
@@ -1528,7 +2455,8 @@ Usage:
   codex-starter --help       Show this help
 
 TUI Keyboard Shortcuts:
-  ↑/↓           Navigate sessions
+  ↑/↓ or j/k    Navigate sessions
+  ←/→ or h/l    Collapse / expand a fork family
   Enter         Start new / resume selected session
   n             Start new session
   m             Cycle launch mode (default/full-auto/danger, remembered)
@@ -1553,5 +2481,7 @@ TUI Keyboard Shortcuts:
     process.exit(0);
   }
 
-  createApp();
+  const activateInputSource = createInputSourceActivator();
+  activateInputSource();
+  createApp({ activateInputSource });
 }

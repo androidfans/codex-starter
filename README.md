@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/%F0%9F%9A%80-Codex_Starter-ff7a1a?style=for-the-badge&labelColor=141414" alt="Codex Starter" />
   <br/>
-  <img src="https://img.shields.io/npm/v/codex-starter?style=flat-square&color=ff5d73&logo=npm" alt="npm" />
+  <img src="https://img.shields.io/badge/package_manager-npm-cb3837?style=flat-square&logo=npm&logoColor=white" alt="npm" />
   <img src="https://img.shields.io/badge/node-%3E%3D18-a3e635?style=flat-square&logo=node.js&logoColor=111111" alt="Node.js" />
   <img src="https://img.shields.io/badge/license-MIT-5ad1e6?style=flat-square" alt="MIT License" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-ffd166?style=flat-square&logoColor=111111" alt="Platform" />
@@ -63,8 +63,11 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 - Dangerous mode with `d`, remembered for the next launch
 - Explicit launch mode selector with `m`, persisted locally
 - Project filter with `p`
+- Fork families collapsed into one row, with Finder-style expansion
+- Full conversation history in an independently scrollable preview
+- Automatically switches macOS to the ABC input source on startup and focus
 - Resume selected session with `Enter`
-- Rename selected session with `r`
+- Rename the selected conversation family or version with `r`
 - Delete selected session with `x`
 - Copy session id with `c`
 - Self-update with `--update`
@@ -75,7 +78,8 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 | Key | Action |
 |:---:|--------|
-| `↑` `↓` | Navigate sessions |
+| `↑` `↓` or `j` `k` | Navigate sessions |
+| `←` `→` or `h` `l` | Collapse / expand a fork family |
 | `Enter` | Start new / resume selected session |
 | `n` | New session |
 | `m` | Cycle launch mode (remembered) |
@@ -84,7 +88,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 | `p` | Filter by project |
 | `s` | Cycle sort mode |
 | `c` | Copy session ID |
-| `r` | Rename selected session |
+| `r` | Rename selected conversation family or version |
 | `x` / `Delete` | Delete selected session |
 | `Home` / `End` | Jump to first / last |
 | `Ctrl-D` / `Ctrl-U` | Page down / up |
@@ -93,6 +97,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 
 ## Requirements
 
+- npm
 - Node.js >= 18
 - Codex CLI (`codex`) available in `PATH`
 
@@ -149,7 +154,7 @@ codex-starter
 | 📋 | **详情预览** | 显示目录、模式、消息、工具调用 |
 | 🔀 | **多种排序** | 时间 / 大小 / 消息数 / 项目 |
 | 📎 | **复制 ID** | `c` 复制 session id |
-| 🔄 | **自更新** | `--update` 检查并升级到 npm 最新版本 |
+| 🔄 | **自更新** | `--update` 检查并通过 npm 升级到最新版本 |
 | 🐚 | **继承 Shell 环境** | 通过你的交互 shell 启动 `codex`，可复用 `~/.zshrc` 里的 wrapper / env |
 | 🔒 | **完全本地** | 不联网，不上传，不追踪 |
 
@@ -164,8 +169,8 @@ npm install -g codex-starter
 ```bash
 git clone https://github.com/Bojun-Vvibe/codex-starter.git
 cd codex-starter
-npm install
-npm link
+npm ci
+npm install -g . --install-links
 ```
 
 然后运行：
