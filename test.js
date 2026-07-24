@@ -305,6 +305,134 @@ describe('session parsing', () => {
     assert.equal(session.project, 'test/Desktop/project-beta');
   });
 
+  it('deduplicates mirrored message records without removing repeated turns', () => {
+    const filePath = writeSession('2026/04/13/rollout-mirrored-messages.jsonl', [
+      {
+        timestamp: '2026-04-13T02:31:02.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-mirrored-messages',
+          timestamp: '2026-04-13T02:31:02.000Z',
+          cwd: '/Users/test/Desktop/project-mirrored',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'run the checks' }],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'run the checks' },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'commentary', message: 'Running checks.' },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'commentary',
+          content: [{ type: 'output_text', text: 'Running checks.' }],
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'run the checks' }],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'run the checks' },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'agent_message', phase: 'final_answer', message: 'Checks passed.' },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'assistant',
+          phase: 'final_answer',
+          content: [{ type: 'output_text', text: 'Checks passed.' }],
+        },
+      },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    assert.equal(session.estimatedMessages, 4);
+
+    loadSessionDetail(session);
+    assert.deepEqual(session.userMessages, ['run the checks', 'run the checks']);
+    assert.deepEqual(session.assistantSnippets, ['Running checks.', 'Checks passed.']);
+    assert.equal(session.totalMessages, 4);
+  });
+
+  it('matches image prompts and keeps interrupted repeated turns separate', () => {
+    const prompt = '[Image #1]\n\nwhere should I click?';
+    const filePath = writeSession('2026/04/13/rollout-image-messages.jsonl', [
+      {
+        timestamp: '2026-04-13T02:31:02.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-image-messages',
+          timestamp: '2026-04-13T02:31:02.000Z',
+          cwd: '/Users/test/Desktop/project-images',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [
+            { type: 'input_text', text: '<image name=[Image #1] path="/tmp/image.png">' },
+            { type: 'input_image', image_url: 'data:image/png;base64,abc' },
+            { type: 'input_text', text: '</image>' },
+            { type: 'input_text', text: prompt },
+          ],
+        },
+      },
+      {
+        type: 'event_msg',
+        payload: { type: 'user_message', message: prompt },
+      },
+      { type: 'event_msg', payload: { type: 'task_complete' } },
+      { type: 'event_msg', payload: { type: 'task_started' } },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: prompt }],
+        },
+      },
+      { type: 'event_msg', payload: { type: 'turn_aborted' } },
+    ]);
+
+    const session = loadSessionQuick(filePath);
+    assert.equal(session.topic, '[Image #1] where should I click?');
+    assert.equal(session.estimatedMessages, 2);
+
+    loadSessionDetail(session);
+    assert.deepEqual(session.userMessages, [prompt, prompt]);
+    assert.deepEqual(session.assistantSnippets, []);
+    assert.equal(session.totalMessages, 2);
+  });
+
   it('keeps fork metadata canonical when inherited parent metadata follows it', () => {
     const filePath = writeSession('2026/04/13/rollout-fork.jsonl', [
       {
