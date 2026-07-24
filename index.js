@@ -319,6 +319,8 @@ function isBoilerplateText(text) {
     normalized.startsWith('<permissions instructions>') ||
     normalized.startsWith('<collaboration_mode>') ||
     normalized.startsWith('<skills_instructions>') ||
+    normalized.startsWith('<image name=') ||
+    normalized === '</image>' ||
     normalized.startsWith('You are Codex, a coding agent') ||
     normalized.startsWith('You are GPT-5.4.')
   );
@@ -414,6 +416,19 @@ function appendConversationMessage(messages, message) {
   return true;
 }
 
+function appendConversationEntry(messages, entry) {
+  const payload = entry.payload || {};
+  const isTurnBoundary = entry.type === 'event_msg'
+    && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
+  if (isTurnBoundary) {
+    if (!messages.at(-1)?.isTurnBoundary) messages.push({ isTurnBoundary: true });
+    return null;
+  }
+
+  const message = getConversationMessage(entry);
+  return appendConversationMessage(messages, message) ? message : null;
+}
+
 function getEntryTimestamp(entry) {
   if (!entry || typeof entry !== 'object') return null;
   if (entry.timestamp) return entry.timestamp;
@@ -462,8 +477,8 @@ function loadSessionQuick(filePath) {
   let customTitle = '';
 
   function countMessage(entry) {
-    const message = getConversationMessage(entry);
-    if (!appendConversationMessage(quickMessages, message)) return;
+    const message = appendConversationEntry(quickMessages, entry);
+    if (!message) return;
     if (message.role === 'user') {
       userMsgCount++;
       if (!firstUserMsg) firstUserMsg = message.text;
@@ -612,7 +627,7 @@ function loadSessionDetail(session) {
         session.threadSource = payload.thread_source || session.threadSource || '';
       }
 
-      appendConversationMessage(conversationMessages, getConversationMessage(entry));
+      appendConversationEntry(conversationMessages, entry);
 
       if (entry.type === 'response_item') {
         const payload = entry.payload || {};
@@ -624,12 +639,12 @@ function loadSessionDetail(session) {
   }
 
   const userMessages = conversationMessages
-    .filter(message => message.role === 'user')
+    .filter(message => !message.isTurnBoundary && message.role === 'user')
     .map(message => message.text.substring(0, 300));
   const assistantSnippets = conversationMessages
-    .filter(message => message.role === 'assistant')
+    .filter(message => !message.isTurnBoundary && message.role === 'assistant')
     .map(message => message.text.substring(0, 400));
-  const totalMessages = conversationMessages.length;
+  const totalMessages = userMessages.length + assistantSnippets.length;
 
   session.userMessages = userMessages;
   session.assistantSnippets = assistantSnippets;
