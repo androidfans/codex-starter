@@ -366,6 +366,54 @@ function extractAssistantText(entry) {
   return '';
 }
 
+function getConversationMessage(entry) {
+  const userText = extractUserText(entry);
+  if (userText) {
+    return {
+      role: 'user',
+      text: userText,
+      phase: '',
+      recordType: entry.type,
+    };
+  }
+
+  const assistantText = extractAssistantText(entry);
+  if (assistantText) {
+    return {
+      role: 'assistant',
+      text: assistantText,
+      phase: (entry.payload && entry.payload.phase) || '',
+      recordType: entry.type,
+    };
+  }
+
+  return null;
+}
+
+function appendConversationMessage(messages, message) {
+  if (!message) return false;
+
+  const previous = messages.at(-1);
+  const isMirroredPair = previous
+    && previous.role === message.role
+    && previous.text === message.text
+    && previous.phase === message.phase
+    && previous.recordType !== message.recordType
+    && [previous.recordType, message.recordType].every(type => (
+      type === 'event_msg' || type === 'response_item'
+    ));
+
+  if (isMirroredPair) {
+    // Prefer the event record when both representations are present. Keeping
+    // the pair local preserves genuinely repeated text in later turns.
+    if (message.recordType === 'event_msg') messages[messages.length - 1] = message;
+    return false;
+  }
+
+  messages.push(message);
+  return true;
+}
+
 function getEntryTimestamp(entry) {
   if (!entry || typeof entry !== 'object') return null;
   if (entry.timestamp) return entry.timestamp;
@@ -410,7 +458,19 @@ function loadSessionQuick(filePath) {
   let firstUserMsg = '';
   let userMsgCount = 0;
   let assistantMsgCount = 0;
+  let quickMessages = [];
   let customTitle = '';
+
+  function countMessage(entry) {
+    const message = getConversationMessage(entry);
+    if (!appendConversationMessage(quickMessages, message)) return;
+    if (message.role === 'user') {
+      userMsgCount++;
+      if (!firstUserMsg) firstUserMsg = message.text;
+    } else {
+      assistantMsgCount++;
+    }
+  }
 
   const firstLine = readFirstLine(filePath);
   if (firstLine) {
@@ -450,14 +510,7 @@ function loadSessionQuick(filePath) {
       if (!firstTs && ts) firstTs = ts;
       if (ts) lastTs = ts;
 
-      const userText = extractUserText(entry);
-      if (userText) {
-        userMsgCount++;
-        if (!firstUserMsg) firstUserMsg = userText;
-      }
-
-      const assistantText = extractAssistantText(entry);
-      if (assistantText) assistantMsgCount++;
+      countMessage(entry);
 
       const titleUpdate = getCustomTitleUpdate(entry);
       if (titleUpdate !== null) customTitle = titleUpdate;
@@ -477,6 +530,10 @@ function loadSessionQuick(filePath) {
   }
 
   if (!firstUserMsg) {
+    firstUserMsg = '';
+    userMsgCount = 0;
+    assistantMsgCount = 0;
+    quickMessages = [];
     const fullLines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
     for (const line of fullLines) {
       try {
@@ -484,13 +541,7 @@ function loadSessionQuick(filePath) {
         const ts = getEntryTimestamp(entry);
         if (!firstTs && ts) firstTs = ts;
         if (ts) lastTs = ts;
-        const userText = extractUserText(entry);
-        if (userText) {
-          userMsgCount++;
-          if (!firstUserMsg) firstUserMsg = userText;
-        }
-        const assistantText = extractAssistantText(entry);
-        if (assistantText) assistantMsgCount++;
+        countMessage(entry);
       } catch (_) { /* ignore */ }
     }
   }
@@ -535,10 +586,8 @@ function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
   const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
 
-  const userMessages = [];
-  const assistantSnippets = [];
+  const conversationMessages = [];
   const toolsUsed = new Set();
-  let totalMessages = 0;
   let canonicalMetaLoaded = false;
 
   for (const line of lines) {
@@ -563,17 +612,7 @@ function loadSessionDetail(session) {
         session.threadSource = payload.thread_source || session.threadSource || '';
       }
 
-      const userText = extractUserText(entry);
-      if (userText) {
-        totalMessages++;
-        userMessages.push(userText.substring(0, 300));
-      }
-
-      const assistantText = extractAssistantText(entry);
-      if (assistantText) {
-        totalMessages++;
-        assistantSnippets.push(assistantText.substring(0, 400));
-      }
+      appendConversationMessage(conversationMessages, getConversationMessage(entry));
 
       if (entry.type === 'response_item') {
         const payload = entry.payload || {};
@@ -583,6 +622,14 @@ function loadSessionDetail(session) {
       if (titleUpdate !== null) session.customTitle = titleUpdate;
     } catch (_) { /* ignore */ }
   }
+
+  const userMessages = conversationMessages
+    .filter(message => message.role === 'user')
+    .map(message => message.text.substring(0, 300));
+  const assistantSnippets = conversationMessages
+    .filter(message => message.role === 'assistant')
+    .map(message => message.text.substring(0, 400));
+  const totalMessages = conversationMessages.length;
 
   session.userMessages = userMessages;
   session.assistantSnippets = assistantSnippets;
