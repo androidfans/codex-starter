@@ -1734,22 +1734,27 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     renderDetail(); updateHeader(); screen.render();
   });
 
-  function moveSelection(delta) {
-    const newIdx = selectedIndex + delta;
+  function moveSelection(delta, preserveViewportOffset = false) {
+    const previousListIdx = selectedIndex + 1;
+    const previousBase = listPanel.childBase;
+    const lastIdx = Math.max(-1, displayRows.length - 1);
+    const newIdx = Math.max(-1, Math.min(selectedIndex + delta, lastIdx));
     // -1 = New Session, 0..length-1 = visible conversation rows
-    if (newIdx >= -1 && newIdx < displayRows.length) {
+    if (newIdx !== selectedIndex) {
       selectedIndex = newIdx;
       const listIdx = selectedIndex + 1;  // list index (0 = New Session row)
       suppressSelectEvent = true;
       listPanel.select(listIdx);
       suppressSelectEvent = false;
 
-      // Scroll only if selection went out of viewport
-      const base = listPanel.childBase;
-      const visible = listPanel.height;
-      if (listIdx < base) {
+      const visible = Math.max(1, listPanel.height || 1);
+      if (preserveViewportOffset) {
+        const maxBase = Math.max(0, displayRows.length + 1 - visible);
+        const viewportOffset = Math.max(0, Math.min(previousListIdx - previousBase, visible - 1));
+        listPanel.childBase = Math.max(0, Math.min(listIdx - viewportOffset, maxBase));
+      } else if (listIdx < listPanel.childBase) {
         listPanel.childBase = listIdx;
-      } else if (listIdx >= base + visible) {
+      } else if (listIdx >= listPanel.childBase + visible) {
         listPanel.childBase = listIdx - visible + 1;
       }
 
@@ -1815,15 +1820,25 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     listPanel.childBase = Math.max(0, selectedIndex + 1 - listPanel.height + 1);
     renderDetail(); updateHeader(); screen.render();
   });
-  screen.key(['pagedown', 'C-d'], () => {
+  screen.key(['pagedown', 'C-f'], () => {
     if (renameMode || popupOpen) return;
-    if (isSearchMode) { isSearchMode = false; updateHeader(); screen.render(); }
-    moveSelection(Math.floor((listPanel.height || 20) / 2));
+    if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
+    moveSelection(listPanel.height || 20, true);
   });
-  screen.key(['pageup', 'C-u'], () => {
+  screen.key(['pageup', 'C-b'], () => {
     if (renameMode || popupOpen) return;
-    if (isSearchMode) { isSearchMode = false; updateHeader(); screen.render(); }
-    moveSelection(-Math.floor((listPanel.height || 20) / 2));
+    if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
+    moveSelection(-(listPanel.height || 20), true);
+  });
+  screen.key(['C-d'], () => {
+    if (renameMode || popupOpen) return;
+    if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
+    moveSelection(Math.max(1, Math.floor((listPanel.height || 20) / 2)), true);
+  });
+  screen.key(['C-u'], () => {
+    if (renameMode || popupOpen) return;
+    if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
+    moveSelection(-Math.max(1, Math.floor((listPanel.height || 20) / 2)), true);
   });
 
   // Search
@@ -2467,7 +2482,8 @@ TUI Keyboard Shortcuts:
   c             Copy session ID
   x / Delete    Delete selected session
   Home / End    Jump to top / bottom
-  Ctrl-D/U      Page down / up
+  Ctrl-F/B      Page down / up
+  Ctrl-D/U      Half-page down / up
   Esc           Clear filter
   q / Ctrl-C    Quit
 `);
