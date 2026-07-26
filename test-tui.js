@@ -753,6 +753,36 @@ describe('codex starter tui', () => {
     for (const key of ['C-f', 'C-b', 'C-d', 'C-u']) {
       assert.ok(screenKeyHandlers[key]?.length > 0, `${key} should be registered`);
     }
+
+    const originalHeight = widgets.list.height;
+    widgets.list.height = 2;
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('right');
+    triggerScreenKey('home');
+
+    triggerScreenKey('C-f');
+    assert.equal(widgets.list._selectedIndex, 2);
+    assert.equal(widgets.list.childBase, 2, 'Ctrl-F should advance a full viewport');
+    triggerScreenKey('C-b');
+    assert.equal(widgets.list._selectedIndex, 0);
+    assert.equal(widgets.list.childBase, 0, 'Ctrl-B should restore the viewport');
+
+    triggerScreenKey('C-d');
+    assert.equal(widgets.list._selectedIndex, 1);
+    assert.equal(widgets.list.childBase, 1, 'Ctrl-D should advance half a viewport');
+    triggerScreenKey('C-u');
+    assert.equal(widgets.list._selectedIndex, 0);
+    assert.equal(widgets.list.childBase, 0, 'Ctrl-U should restore the viewport');
+
+    triggerScreenKey('/');
+    triggerScreenKey('C-f');
+    assert.match(widgets.footer.getContent(), /New/, 'page navigation should restore the normal footer');
+
+    triggerScreenKey('home');
+    triggerScreenKey('down');
+    triggerScreenKey('left');
+    widgets.list.height = originalHeight;
   });
 
   it('allows Ctrl-C to quit while a popup is open', () => {
