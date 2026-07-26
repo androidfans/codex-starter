@@ -91,7 +91,8 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 | `r` | Rename selected conversation family or version |
 | `x` / `Delete` | Delete selected session |
 | `Home` / `End` | Jump to first / last |
-| `Ctrl-D` / `Ctrl-U` | Page down / up |
+| `Ctrl-F` / `Ctrl-B` | Page down / up |
+| `Ctrl-D` / `Ctrl-U` | Half-page down / up |
 | `Esc` | Clear filter |
 | `q` / `Ctrl-C` | Quit |
 
@@ -195,7 +196,8 @@ codex-starter
 | `r` | 重命名会话 |
 | `x` / `Delete` | 删除会话 |
 | `Home` / `End` | 跳到顶 / 底 |
-| `Ctrl-D` / `Ctrl-U` | 翻页 |
+| `Ctrl-F` / `Ctrl-B` | 向下 / 向上翻整页 |
+| `Ctrl-D` / `Ctrl-U` | 向下 / 向上翻半页 |
 | `Esc` | 清空搜索 / 过滤 |
 | `q` / `Ctrl-C` | 退出 |
 

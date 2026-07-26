@@ -749,6 +749,12 @@ describe('codex starter tui', () => {
     assert.equal(mod.loadMeta().defaultLaunchMode, 'danger');
   });
 
+  it('supports Vim full-page and half-page navigation keys', () => {
+    for (const key of ['C-f', 'C-b', 'C-d', 'C-u']) {
+      assert.ok(screenKeyHandlers[key]?.length > 0, `${key} should be registered`);
+    }
+  });
+
   it('allows Ctrl-C to quit while a popup is open', () => {
     triggerScreenKey('p');
     const previousExitCallCount = exitCallCount;
