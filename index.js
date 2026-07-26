@@ -1750,7 +1750,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const visible = Math.max(1, listPanel.height || 1);
       if (preserveViewportOffset) {
         const maxBase = Math.max(0, displayRows.length + 1 - visible);
-        const viewportOffset = previousListIdx - previousBase;
+        const viewportOffset = Math.max(0, Math.min(previousListIdx - previousBase, visible - 1));
         listPanel.childBase = Math.max(0, Math.min(listIdx - viewportOffset, maxBase));
       } else if (listIdx < listPanel.childBase) {
         listPanel.childBase = listIdx;

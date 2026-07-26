@@ -775,6 +775,13 @@ describe('codex starter tui', () => {
     assert.equal(widgets.list._selectedIndex, 0);
     assert.equal(widgets.list.childBase, 0, 'Ctrl-U should restore the viewport');
 
+    widgets.list.height = 3;
+    triggerScreenKey('C-f');
+    widgets.list.height = 2;
+    triggerScreenKey('C-u');
+    assert.equal(widgets.list._selectedIndex, 2);
+    assert.equal(widgets.list.childBase, 1, 'page navigation should clamp a stale offset after resize');
+
     triggerScreenKey('/');
     triggerScreenKey('C-f');
     assert.match(widgets.footer.getContent(), /New/, 'page navigation should restore the normal footer');
