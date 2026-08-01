@@ -589,6 +589,19 @@ describe('codex starter tui', () => {
     assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
   });
 
+  it('reactivates ABC after confirming or cancelling search input', () => {
+    const beforeConfirm = inputSourceActivationCount;
+    triggerKeypress(null, 'enter');
+    triggerScreenKey('enter');
+    assert.equal(inputSourceActivationCount, beforeConfirm + 1);
+
+    triggerScreenKey('/');
+    triggerKeypress('x');
+    const beforeCancel = inputSourceActivationCount;
+    triggerKeypress(null, 'escape');
+    assert.equal(inputSourceActivationCount, beforeCancel + 1);
+  });
+
   it('searches final answers but not commentary or tool output', () => {
     triggerKeypress(null, 'escape');
     triggerScreenKey('/');

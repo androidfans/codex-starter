@@ -1887,6 +1887,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         isSearchMode = false;
         filterText = '';
         applyFilter();
+        activateInputSource();
         return;
       }
       filterText = '';
@@ -1933,7 +1934,13 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
 
     if (!isSearchMode) return;
-    if (key.name === 'return' || key.name === 'enter') { isSearchMode = false; searchJustConfirmed = true; renderAll(); return; }
+    if (key.name === 'return' || key.name === 'enter') {
+      isSearchMode = false;
+      searchJustConfirmed = true;
+      renderAll();
+      activateInputSource();
+      return;
+    }
     // Only accept printable characters (exclude control chars like \r \n \t)
     if (ch && ch.length === 1 && ch.charCodeAt(0) >= 32 && !key.ctrl && !key.meta) { filterText += ch; selectedIndex = -1; applyFilter(); }
   });
@@ -2010,7 +2017,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       resumeSession(session);
       return;
     }
-    if (isSearchMode) { isSearchMode = false; renderAll(); return; }
+    if (isSearchMode) {
+      isSearchMode = false;
+      renderAll();
+      activateInputSource();
+      return;
+    }
     if (popupOpen) return;
     if (selectedIndex === -1) { startNewSession(); return; }
     if (displayRows.length === 0 || selectedIndex < 0) return;
