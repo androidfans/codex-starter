@@ -632,7 +632,7 @@ describe('codex starter tui', () => {
     const latestPath = path.join(sessionsDir, 'rollout-a-fork-latest.jsonl');
     const transcriptBefore = fs.readFileSync(latestPath, 'utf-8');
 
-    triggerScreenKey('r');
+    triggerScreenKey(',');
     for (const ch of 'family-marker') triggerKeypress(ch);
     triggerKeypress(null, 'enter');
 
@@ -659,7 +659,7 @@ describe('codex starter tui', () => {
     triggerKeypress(null, 'enter');
     triggerScreenKey('enter');
 
-    triggerScreenKey('r');
+    triggerScreenKey(',');
     for (let i = 0; i < 20; i++) triggerKeypress(null, 'backspace');
     for (const ch of 'renamed-conversation') triggerKeypress(ch);
     triggerKeypress(null, 'enter');
@@ -671,7 +671,7 @@ describe('codex starter tui', () => {
 
     triggerScreenKey('home');
     triggerScreenKey('down');
-    triggerScreenKey('r');
+    triggerScreenKey(',');
     for (let i = 0; i < 20; i++) triggerKeypress(null, 'backspace');
     triggerKeypress(null, 'enter');
     assert.equal(mod.loadMeta().families, undefined, 'clearing removes empty family metadata');
@@ -685,7 +685,7 @@ describe('codex starter tui', () => {
     triggerScreenKey('down');
     triggerScreenKey('right');
     triggerScreenKey('down');
-    triggerScreenKey('r');
+    triggerScreenKey(',');
     for (let i = 0; i < 80; i++) triggerKeypress(null, 'backspace');
     triggerKeypress(null, 'enter');
 

@@ -1250,7 +1250,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         '{#5ad1e6-fg}{bold}p{/} {#5ad1e6-fg}Project{/}',
         '{#5bd1b9-fg}{bold}s{/} {#5bd1b9-fg}Sort{/}',
       '{#8a8178-fg}{bold}c{/} {#8a8178-fg}Copy ID{/}',
-      '{#ff8f3f-fg}{bold}r{/} {#ff8f3f-fg}Rename{/}',
+      '{#ff8f3f-fg}{bold},{/} {#ff8f3f-fg}Rename{/}',
       '{#ff5d73-fg}{bold}x{/} {#ff5d73-fg}Delete{/}',
       '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}',
     ];
@@ -2270,7 +2270,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }, 50);
   }
 
-  screen.key(['r'], () => {
+  screen.key([','], () => {
     if (isSearchMode || popupOpen) return;
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
     showRenameInput(displayRows[selectedIndex]);

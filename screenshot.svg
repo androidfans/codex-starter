@@ -142,7 +142,7 @@
   <text x="377" y="507" class="cyan bold">p</text><text x="390" y="507" class="cyan"> Project</text>
   <text x="465" y="507" class="teal bold">s</text><text x="478" y="507" class="teal"> Sort</text>
   <text x="535" y="507" class="muted bold">c</text><text x="548" y="507" class="muted"> Copy ID</text>
-  <text x="620" y="507" class="orange2 bold">r</text><text x="633" y="507" class="orange2"> Rename</text>
+  <text x="620" y="507" class="orange2 bold">,</text><text x="633" y="507" class="orange2"> Rename</text>
   <text x="714" y="507" class="red bold">x</text><text x="727" y="507" class="red"> Delete</text>
   <text x="800" y="507" class="muted bold">q</text><text x="813" y="507" class="muted"> Quit</text>
 </svg>
