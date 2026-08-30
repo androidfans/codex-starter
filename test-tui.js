@@ -41,7 +41,7 @@ writeSession('rollout-a.jsonl', [
   {
     timestamp: '2026-04-13T02:47:52.000Z',
     type: 'event_msg',
-    payload: { type: 'agent_message', message: 'On it.' },
+    payload: { type: 'agent_message', message: 'On it. See docs/{spec,history}.md' },
   },
   {
     timestamp: '2026-04-13T02:47:53.000Z',
@@ -349,8 +349,9 @@ before(async () => {
   assert.match(widgets.header.getContent(), /indexing search/);
   // Initial render happens synchronously; search indexing starts on the next
   // event-loop turn and streams each transcript without blocking the TUI.
-  for (let attempt = 0; attempt < 100 && /indexing search/.test(widgets.header.getContent()); attempt++) {
-    await new Promise(resolve => setImmediate(resolve));
+  const indexingDeadline = Date.now() + 5000;
+  while (/indexing search/.test(widgets.header.getContent()) && Date.now() < indexingDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.doesNotMatch(widgets.header.getContent(), /indexing search/);
 });
@@ -443,7 +444,7 @@ describe('codex starter tui', () => {
     assert.ok(codexPreviewCount <= userPreviewCount);
     assert.match(
       widgets.detailMessages.getContent(),
-      /On it\.\{\/\}\n\n .*You >\{\/\} extra prompt 01/,
+      /On it\. See docs\/\{open\}spec,history\{close\}\.md\{\/\}\n\n .*You >\{\/\} extra prompt 01/,
     );
     triggerScreenKey('left');
   });
