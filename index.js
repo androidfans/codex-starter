@@ -497,6 +497,23 @@ function getEntryTimestamp(entry) {
   return null;
 }
 
+function getLineTimestamp(line) {
+  const head = line.substring(0, 4096);
+  const typeIndex = head.search(/"type"\s*:/);
+  const match = head.substring(0, typeIndex === -1 ? 512 : typeIndex)
+    .match(/"timestamp"\s*:\s*"([^"]+)"/);
+  return match ? match[1] : null;
+}
+
+function formatDuration(firstTs, lastTs) {
+  if (!firstTs || !lastTs) return '';
+  const diffMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
+  if (!(diffMs > 0)) return '';
+  const hours = Math.floor(diffMs / 3600000);
+  const minutes = Math.floor((diffMs % 3600000) / 60000);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 function trimTopic(text, max = 120) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return '';
@@ -609,15 +626,7 @@ function loadSessionQuick(filePath, options = {}) {
 
   const estimatedMessages = Math.max(userMsgCount + assistantMsgCount, userMsgCount);
 
-  let durationStr = '';
-  if (firstTs && lastTs) {
-    const diffMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
-    if (diffMs > 0) {
-      const hours = Math.floor(diffMs / 3600000);
-      const minutes = Math.floor((diffMs % 3600000) / 60000);
-      durationStr = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
-    }
-  }
+  const durationStr = formatDuration(firstTs, lastTs);
 
   return {
     sessionId,
@@ -759,6 +768,7 @@ async function buildSessionSearchData(session, options = {}) {
   const userInputs = new Set();
   const finalAnswers = new Set();
   const conversationMessages = [];
+  let lastTs = null;
   const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
   // readline buffers one complete JSONL record. That trade-off is intentional:
   // local transcript records are expected to fit in memory, including the user
@@ -774,9 +784,13 @@ async function buildSessionSearchData(session, options = {}) {
       input.destroy();
       return null;
     }
+    const lineTimestamp = getLineTimestamp(line);
+    if (lineTimestamp) lastTs = lineTimestamp;
     if (!isSearchRelevantLine(line)) continue;
     try {
       const entry = JSON.parse(line);
+      const entryTimestamp = getEntryTimestamp(entry);
+      if (entryTimestamp) lastTs = entryTimestamp;
       collectSessionSearchEntry(entry, userInputs, finalAnswers);
       appendConversationEntry(conversationMessages, entry);
     } catch (_) { /* ignore malformed lines */ }
@@ -786,6 +800,7 @@ async function buildSessionSearchData(session, options = {}) {
     searchText: [...userInputs, ...finalAnswers].join('\n').toLowerCase(),
     firstUserMessage: userInputs.values().next().value || '',
     estimatedMessages: conversationMessages.filter(message => !message.isTurnBoundary).length,
+    lastTs,
   };
 }
 
@@ -835,15 +850,21 @@ function indexSessionsInBackground(sessions, options = {}) {
 function applySessionSearchData(session, searchData) {
   const previousTopic = session.topic;
   const previousCount = session.estimatedMessages;
+  const previousLastTs = session.lastTs;
   session.searchText = (searchData && searchData.searchText) || '';
   session.estimatedMessages = (searchData && searchData.estimatedMessages) || 0;
+  if (searchData && searchData.lastTs) session.lastTs = searchData.lastTs;
+  session.duration = formatDuration(session.firstTs, session.lastTs);
   if (session._topicPending) {
     session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
     session._topicPending = false;
     if (!searchData || !searchData.firstUserMessage) session._excludeFromList = true;
   }
   session._summaryChangedDuringIndex = session.topic !== previousTopic
-    || session.estimatedMessages !== previousCount;
+    || session.estimatedMessages !== previousCount
+    || session.lastTs !== previousLastTs;
+  session._messageCountChangedDuringIndex = session.estimatedMessages !== previousCount;
+  session._timeChangedDuringIndex = session.lastTs !== previousLastTs;
 }
 
 async function resolvePendingSessionSummaries(sessions) {
@@ -1279,6 +1300,7 @@ function copyToClipboard(text) {
 async function runListMode(limit) {
   const sessions = loadAllSessions();
   await resolvePendingSessionSummaries(sessions);
+  sessions.sort((a, b) => sessionTimestamp(b) - sessionTimestamp(a));
   const display = sessions.slice(0, limit || 30);
   const C = {
     reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m',
@@ -1889,7 +1911,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
+    const activeSortChanged = (sortMode === 'messages' && session._messageCountChangedDuringIndex)
+      || (sortMode === 'time' && session._timeChangedDuringIndex);
     session._summaryChangedDuringIndex = false;
+    session._messageCountChangedDuringIndex = false;
+    session._timeChangedDuringIndex = false;
+    if (activeSortChanged) sortSessionsForMode();
     if (summaryChanged) summaryRefreshPending = true;
     if ((!filterText && !projectFilter && !summaryChanged) || indexRefreshTimer) return;
     // Throttle rather than debounce so a continuously running index cannot
@@ -1903,16 +1930,20 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   }
 
   // ─── Sort ──────────────────────────────────────────────────────────────
+  function sortSessionsForMode() {
+    const sorters = {
+      time: (a, b) => sessionTimestamp(b) - sessionTimestamp(a),
+      size: (a, b) => b.fileSize - a.fileSize,
+      messages: (a, b) => b.estimatedMessages - a.estimatedMessages,
+      project: (a, b) => a.project.localeCompare(b.project) || sessionTimestamp(b) - sessionTimestamp(a),
+    };
+    allSessions.sort(sorters[sortMode]);
+  }
+
   function cycleSort() {
     const modes = ['time', 'size', 'messages', 'project'];
     sortMode = modes[(modes.indexOf(sortMode) + 1) % modes.length];
-    const sorters = {
-      time: (a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()),
-      size: (a, b) => b.fileSize - a.fileSize,
-      messages: (a, b) => b.estimatedMessages - a.estimatedMessages,
-      project: (a, b) => a.project.localeCompare(b.project) || (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()),
-    };
-    allSessions.sort(sorters[sortMode]);
+    sortSessionsForMode();
     selectedIndex = 0;
     applyFilter();
   }

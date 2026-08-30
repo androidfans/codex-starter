@@ -755,6 +755,11 @@ describe('session parsing', () => {
         type: 'event_msg',
         payload: { type: 'user_message', message: 'topic discovered asynchronously' },
       },
+      {
+        timestamp: '2026-04-13T08:00:00.000Z',
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'x'.repeat(32 * 1024) },
+      },
     ]);
 
     const originalReadFileSync = fs.readFileSync;
@@ -776,6 +781,8 @@ describe('session parsing', () => {
     assert.equal(session.topic, 'topic discovered asynchronously');
     assert.equal(session._topicPending, false);
     assert.equal(session.estimatedMessages, 1);
+    assert.equal(session.lastTs, '2026-04-13T08:00:00.000Z');
+    assert.equal(session.duration, '2h 0m');
   });
 
   it('resolves pending topics and excludes empty sessions before list output', async () => {
