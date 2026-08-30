@@ -760,7 +760,8 @@ function collectSessionSearchEntry(entry, userInputs, finalAnswers) {
 async function buildSessionSearchData(session, options = {}) {
   const userInputs = new Set();
   const finalAnswers = new Set();
-  const conversationMessages = [];
+  const conversationTail = [];
+  let estimatedMessages = 0;
   let lastTs = null;
   const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
   // readline buffers one complete JSONL record. That trade-off is intentional:
@@ -785,14 +786,18 @@ async function buildSessionSearchData(session, options = {}) {
       const entryTimestamp = getEntryTimestamp(entry);
       if (entryTimestamp) lastTs = entryTimestamp;
       collectSessionSearchEntry(entry, userInputs, finalAnswers);
-      appendConversationEntry(conversationMessages, entry);
+      if (appendConversationEntry(conversationTail, entry)) estimatedMessages++;
+      // Deduplication only depends on the immediately preceding message or
+      // turn boundary; retaining older bodies would make indexing memory grow
+      // with the entire transcript for no additional accuracy.
+      if (conversationTail.length > 1) conversationTail.splice(0, conversationTail.length - 1);
     } catch (_) { /* ignore malformed lines */ }
   }
 
   return {
     searchText: [...userInputs, ...finalAnswers].join('\n').toLowerCase(),
     firstUserMessage: userInputs.values().next().value || '',
-    estimatedMessages: conversationMessages.filter(message => !message.isTurnBoundary).length,
+    estimatedMessages,
     lastTs,
   };
 }

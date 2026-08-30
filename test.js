@@ -667,6 +667,7 @@ describe('session parsing', () => {
     await scheduled.shift()();
     assert.deepEqual(indexed, ['sess-search']);
     assert.match(sessions[0].searchText, /release-summary-marker/);
+    assert.equal(sessions[0].estimatedMessages, 6);
     assert.equal(completed, false);
 
     await scheduled.shift()();
