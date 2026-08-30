@@ -516,6 +516,27 @@ describe('session parsing', () => {
     assert.deepEqual(session.ancestorIds, ['deep-parent', 'deep-root']);
   });
 
+  it('classifies canonical session metadata beyond the first-line read limit', () => {
+    const filePath = writeSession('2026/04/13/rollout-large-canonical-meta.jsonl', [
+      {
+        timestamp: '2026-04-13T05:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-large-canonical-meta',
+          timestamp: '2026-04-13T05:30:00.000Z',
+          cwd: '/Users/test/Desktop/large-canonical-meta',
+          source: 'cli',
+          originator: 'codex-tui',
+          base_instructions: 'x'.repeat(600 * 1024),
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'large metadata prompt' } },
+    ]);
+
+    assert.equal(loadSessionQuick(filePath).sessionId, 'sess-large-canonical-meta');
+    assert.ok(loadAllSessions().some(session => session.sessionId === 'sess-large-canonical-meta'));
+  });
+
   it('keeps a cleared custom title cleared after reloading', () => {
     const filePath = writeSession('2026/04/13/rollout-title-cleared.jsonl', [
       {

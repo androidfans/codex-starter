@@ -565,14 +565,7 @@ function loadSessionQuick(filePath, options = {}) {
     }
   }
 
-  const canonicalMetaEntry = options.canonicalMetaEntry || (() => {
-    const firstLine = readFirstLine(filePath);
-    if (!firstLine) return null;
-    try {
-      return JSON.parse(firstLine);
-    } catch (_) { /* ignore */ }
-    return null;
-  })();
+  const canonicalMetaEntry = options.canonicalMetaEntry || readCanonicalSessionMeta(filePath);
   if (canonicalMetaEntry && canonicalMetaEntry.type === 'session_meta') {
     const payload = canonicalMetaEntry.payload || {};
     sessionId = payload.id || sessionLabel;
@@ -940,7 +933,10 @@ function makeSessionCacheRecord(stat, session = null) {
 }
 
 function readCanonicalSessionMeta(filePath) {
-  const firstLine = readFirstLine(filePath);
+  // Canonical metadata may embed base instructions larger than the quick-read
+  // window. Classification must consume this one complete record or a valid
+  // interactive session could be cached as excluded indefinitely.
+  const firstLine = readFirstLine(filePath, Infinity);
   if (!firstLine) return null;
   try {
     const entry = JSON.parse(firstLine);
