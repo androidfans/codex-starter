@@ -1913,7 +1913,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
     const activeSortChanged = (sortMode === 'messages' && session._messageCountChangedDuringIndex)
-      || (sortMode === 'time' && session._timeChangedDuringIndex);
+      || ((sortMode === 'time' || sortMode === 'project') && session._timeChangedDuringIndex);
     session._summaryChangedDuringIndex = false;
     session._messageCountChangedDuringIndex = false;
     session._timeChangedDuringIndex = false;
