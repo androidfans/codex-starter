@@ -19,6 +19,8 @@ const {
   loadSessionDetail,
   buildSessionSearchText,
   indexSessionsInBackground,
+  updateSessionCacheRecord,
+  flushSessionCache,
   isInteractiveSession,
   loadAllSessions,
   filterSessionList,
@@ -44,6 +46,7 @@ const {
   CODEX_DIR,
   SESSIONS_DIR,
   META_FILE,
+  CACHE_FILE,
 } = mod;
 
 function writeSession(relativePath, lines) {
@@ -67,6 +70,7 @@ describe('paths', () => {
     assert.equal(CODEX_DIR, path.join(tmpHome, '.codex'));
     assert.equal(SESSIONS_DIR, path.join(tmpHome, '.codex', 'sessions'));
     assert.equal(META_FILE, path.join(tmpHome, '.codex', 'codex-starter-meta.json'));
+    assert.equal(CACHE_FILE, path.join(tmpHome, '.codex', 'codex-starter-cache.json'));
   });
 });
 
@@ -521,6 +525,27 @@ describe('session parsing', () => {
     assert.deepEqual(session.ancestorIds, ['deep-parent', 'deep-root']);
   });
 
+  it('classifies canonical session metadata beyond the first-line read limit', () => {
+    const filePath = writeSession('2026/04/13/rollout-large-canonical-meta.jsonl', [
+      {
+        timestamp: '2026-04-13T05:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-large-canonical-meta',
+          timestamp: '2026-04-13T05:30:00.000Z',
+          cwd: '/Users/test/Desktop/large-canonical-meta',
+          source: 'cli',
+          originator: 'codex-tui',
+          base_instructions: 'x'.repeat(600 * 1024),
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'large metadata prompt' } },
+    ]);
+
+    assert.equal(loadSessionQuick(filePath).sessionId, 'sess-large-canonical-meta');
+    assert.ok(loadAllSessions().some(session => session.sessionId === 'sess-large-canonical-meta'));
+  });
+
   it('keeps a cleared custom title cleared after reloading', () => {
     const filePath = writeSession('2026/04/13/rollout-title-cleared.jsonl', [
       {
@@ -651,6 +676,7 @@ describe('session parsing', () => {
     await scheduled.shift()();
     assert.deepEqual(indexed, ['sess-search']);
     assert.match(sessions[0].searchText, /release-summary-marker/);
+    assert.equal(sessions[0].estimatedMessages, 6);
     assert.equal(completed, false);
 
     await scheduled.shift()();
@@ -732,6 +758,243 @@ describe('session parsing', () => {
     assert.ok(ids.includes('sess-quick'));
     assert.ok(ids.includes('sess-old'));
     assert.ok(!ids.includes('sess-detail'));
+  });
+
+  it('defers a topic beyond the quick-read window without reading the whole file', async () => {
+    const filePath = writeSession('2026/04/13/rollout-late-topic.jsonl', [
+      {
+        timestamp: '2026-04-13T06:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-late-topic',
+          timestamp: '2026-04-13T06:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-late-topic',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: `<environment_context>${'x'.repeat(300 * 1024)}` }],
+        },
+      },
+      {
+        timestamp: '2026-04-13T06:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'topic discovered asynchronously' },
+      },
+      {
+        timestamp: '2026-04-13T08:00:00.000Z',
+        type: 'response_item',
+        payload: { type: 'custom_tool_call_output', output: 'x'.repeat(32 * 1024) },
+      },
+    ]);
+
+    const originalReadFileSync = fs.readFileSync;
+    fs.readFileSync = function(target, ...args) {
+      if (target === filePath) throw new Error('quick loading must not read the whole rollout');
+      return originalReadFileSync.call(this, target, ...args);
+    };
+    let session;
+    try {
+      session = loadSessionQuick(filePath);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+
+    assert.equal(session.topic, '(loading topic…)');
+    const scheduled = [];
+    indexSessionsInBackground([session], { schedule: callback => scheduled.push(callback) });
+    await scheduled.shift()();
+    assert.equal(session.topic, 'topic discovered asynchronously');
+    assert.equal(session._topicPending, false);
+    assert.equal(session.estimatedMessages, 1);
+    assert.equal(session.lastTs, '2026-04-13T08:00:00.000Z');
+    assert.equal(session.duration, '2h 0m');
+  });
+
+  it('resolves pending topics and excludes empty sessions before list output', async () => {
+    writeSession('2026/04/13/rollout-list-late-topic.jsonl', [
+      {
+        timestamp: '2026-04-13T06:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-list-late-topic',
+          timestamp: '2026-04-13T06:30:00.000Z',
+          cwd: '/Users/test/Desktop/project-list',
+          source: 'cli',
+        },
+      },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `<environment_context>${'x'.repeat(300 * 1024)}` }] } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'resolved list topic' } },
+    ]);
+    writeSession('2026/04/13/rollout-list-empty.jsonl', [
+      {
+        timestamp: '2026-04-13T06:31:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-list-empty',
+          timestamp: '2026-04-13T06:31:00.000Z',
+          cwd: '/Users/test/Desktop/project-list-empty',
+          source: 'cli',
+        },
+      },
+    ]);
+
+    const originalLog = console.log;
+    const output = [];
+    console.log = value => output.push(String(value));
+    try {
+      await mod.runListMode(1000);
+    } finally {
+      console.log = originalLog;
+    }
+
+    const text = output.join('\n');
+    assert.match(text, /resolved list topic/);
+    assert.doesNotMatch(text, /loading topic/);
+    assert.doesNotMatch(text, /project-list-empty/);
+  });
+
+  it('filters non-interactive rollouts after reading only their canonical metadata', () => {
+    const filePath = writeSession('2026/04/13/rollout-prefiltered-exec.jsonl', [
+      {
+        timestamp: '2026-04-13T07:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-prefiltered-exec',
+          timestamp: '2026-04-13T07:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-prefilter',
+          source: 'exec',
+          originator: 'codex_exec',
+        },
+      },
+      { type: 'response_item', payload: { output: 'x'.repeat(300 * 1024) } },
+    ]);
+
+    const originalOpenSync = fs.openSync;
+    let sessionOpens = 0;
+    fs.openSync = function(target, ...args) {
+      if (target === filePath) sessionOpens++;
+      return originalOpenSync.call(this, target, ...args);
+    };
+    let sessions;
+    try {
+      sessions = loadAllSessions();
+    } finally {
+      fs.openSync = originalOpenSync;
+    }
+
+    assert.equal(sessionOpens, 1);
+    assert.ok(!sessions.some(session => session.sessionId === 'sess-prefiltered-exec'));
+    assert.equal(JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath].included, false);
+  });
+
+  it('reuses unchanged cached summaries and invalidates changed files', () => {
+    const filePath = writeSession('2026/04/13/rollout-cached.jsonl', [
+      {
+        timestamp: '2026-04-13T08:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-cached',
+          timestamp: '2026-04-13T08:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-13T08:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'cached session topic' },
+      },
+    ]);
+    loadAllSessions();
+
+    const originalOpenSync = fs.openSync;
+    let sessionOpens = 0;
+    fs.openSync = function(target, ...args) {
+      if (target === filePath) sessionOpens++;
+      return originalOpenSync.call(this, target, ...args);
+    };
+    try {
+      const cachedSessions = loadAllSessions();
+      assert.ok(cachedSessions.some(session => session.sessionId === 'sess-cached'));
+      assert.equal(sessionOpens, 0);
+
+      fs.appendFileSync(filePath, `\n${JSON.stringify({
+        timestamp: '2026-04-13T08:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'cache invalidated' },
+      })}`);
+      loadAllSessions();
+      assert.ok(sessionOpens > 0);
+    } finally {
+      fs.openSync = originalOpenSync;
+    }
+  });
+
+  it('does not attach indexed data to a newer rollout fingerprint', async () => {
+    const filePath = writeSession('2026/04/13/rollout-index-race.jsonl', [
+      {
+        timestamp: '2026-04-13T08:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-index-race',
+          timestamp: '2026-04-13T08:30:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'original indexed text' } },
+    ]);
+    const sessions = loadAllSessions();
+    const session = sessions.find(candidate => candidate.sessionId === 'sess-index-race');
+    const originalSize = fs.statSync(filePath).size;
+    fs.appendFileSync(filePath, `\n${JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'appended during indexing' },
+    })}`);
+
+    const scheduled = [];
+    indexSessionsInBackground([session], { schedule: callback => scheduled.push(callback) });
+    await scheduled.shift()();
+    updateSessionCacheRecord(sessions, session);
+    flushSessionCache(sessions);
+
+    const staleRecord = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath];
+    assert.equal(staleRecord.size, originalSize);
+    loadAllSessions();
+    const refreshedRecord = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath];
+    assert.equal(refreshedRecord.size, fs.statSync(filePath).size);
+  });
+
+  it('rebuilds a corrupt cache and prunes deleted rollouts', () => {
+    const filePath = writeSession('2026/04/13/rollout-cache-prune.jsonl', [
+      {
+        timestamp: '2026-04-13T09:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-cache-prune',
+          timestamp: '2026-04-13T09:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'prune me' } },
+    ]);
+    loadAllSessions();
+    assert.ok(JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath]);
+
+    fs.unlinkSync(filePath);
+    fs.writeFileSync(CACHE_FILE, '{broken cache');
+    assert.doesNotThrow(() => loadAllSessions());
+    const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+    assert.equal(rebuilt.version, 1);
+    assert.equal(rebuilt.files[filePath], undefined);
   });
 });
 

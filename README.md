@@ -56,6 +56,8 @@ It is designed for people treating coding agents as part of a real workflow, not
 
 By default it only shows interactive sessions that make sense to resume. One-shot `codex exec` runs are still parseable on disk, but they are excluded from the main list so the starter does not reopen stale automation contexts.
 
+Session summaries and completed search indexes are cached in `~/.codex/codex-starter-cache.json`. The cache is local, automatically invalidated when a rollout changes, and safe to delete if you want to rebuild it.
+
 ## Features
 
 - Warm ember-themed split-pane TUI
@@ -65,6 +67,7 @@ By default it only shows interactive sessions that make sense to resume. One-sho
 - Project filter with `p`
 - Fork families collapsed into one row, with Finder-style expansion
 - Full conversation history in an independently scrollable preview
+- Cached startup that only reparses new or changed rollouts
 - Automatically switches macOS to the ABC input source on startup and focus
 - Resume selected session with `Enter`
 - Rename the selected conversation family or version with `,`
@@ -139,6 +142,8 @@ codex-starter
 
 默认只展示可直接 `codex resume <id>` 的交互式会话。像 `codex exec` 这类一次性执行记录虽然仍能被解析，但不会出现在首页列表里，避免恢复到旧的自动化工作目录并触发无关 MCP / 环境变量报错。
 
+会话摘要和已完成的搜索索引会缓存在 `~/.codex/codex-starter-cache.json`。缓存完全位于本地，会在 rollout 变化后自动失效，也可以随时安全删除并重建。
+
 ## 特性
 
 | | 功能 | 说明 |
@@ -153,6 +158,7 @@ codex-starter
 | ✏️ | **重命名** | `r` 给会话起一个更容易记住的标题 |
 | 🗑️ | **删除会话** | `x` / `Delete` 删除本地 JSONL 会话 |
 | 📋 | **详情预览** | 显示目录、模式、消息、工具调用 |
+| 🚀 | **增量启动** | 只重新解析新增或发生变化的 rollout |
 | 🔀 | **多种排序** | 时间 / 大小 / 消息数 / 项目 |
 | 📎 | **复制 ID** | `c` 复制 session id |
 | 🔄 | **自更新** | `--update` 检查并通过 npm 升级到最新版本 |
