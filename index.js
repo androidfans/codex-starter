@@ -122,6 +122,10 @@ const PROJECT_COLORS = [
 const CODEX_DIR = path.join(os.homedir(), '.codex');
 const SESSIONS_DIR = path.join(CODEX_DIR, 'sessions');
 const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
+const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
+const CACHE_VERSION = 1;
+const PENDING_TOPIC = '(loading topic…)';
+const sessionCacheContexts = new WeakMap();
 
 // ─── Session Meta ────────────────────────────────────────────────────
 // Stores user-defined metadata for sessions in a simple JSON file.
@@ -139,6 +143,35 @@ function saveMeta(meta) {
   try {
     fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), 'utf-8');
   } catch (e) { /* silently fail */ }
+}
+
+function emptySessionCache() {
+  return { version: CACHE_VERSION, files: {} };
+}
+
+function loadSessionCache() {
+  try {
+    const cache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+    if (cache.version === CACHE_VERSION && cache.files && typeof cache.files === 'object') {
+      return cache;
+    }
+  } catch (_) { /* missing or corrupt cache; rebuild it */ }
+  return emptySessionCache();
+}
+
+function saveSessionCache(cache) {
+  const tempFile = `${CACHE_FILE}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(CODEX_DIR, { recursive: true });
+    fs.writeFileSync(tempFile, JSON.stringify(cache), 'utf-8');
+    fs.renameSync(tempFile, CACHE_FILE);
+    return true;
+  } catch (_) {
+    try {
+      if (fs.existsSync(tempFile)) fs.unlinkSync(tempFile);
+    } catch (_) { /* ignore cleanup failures */ }
+    return false;
+  }
 }
 
 function getSessionMeta(meta, sessionId) {
@@ -222,8 +255,8 @@ function readFirstLine(filePath, maxBytes = 512 * 1024) {
   return Buffer.concat(chunks).toString('utf-8');
 }
 
-function readHeadText(filePath, bytes = 256 * 1024) {
-  const stat = fs.statSync(filePath);
+function readHeadText(filePath, bytes = 256 * 1024, knownStat = null) {
+  const stat = knownStat || fs.statSync(filePath);
   const size = Math.min(bytes, stat.size);
   const fd = fs.openSync(filePath, 'r');
   const buffer = Buffer.alloc(size);
@@ -235,7 +268,29 @@ function readHeadText(filePath, bytes = 256 * 1024) {
   return buffer.toString('utf-8');
 }
 
-function readLeadingSessionMetaEntries(filePath) {
+function readLeadingSessionMetaEntries(filePath, headText = '') {
+  if (headText) {
+    const entries = [];
+    // Ignore the final fragment: the quick read may end in the middle of a
+    // JSONL record. Most rollouts reach a non-meta record inside this buffer,
+    // avoiding another open/read pass entirely.
+    const completeLines = headText.split('\n');
+    const trailingFragment = completeLines.pop() || '';
+    for (const line of completeLines) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== 'session_meta') return entries;
+        entries.push(entry);
+      } catch (_) {
+        break;
+      }
+    }
+    const trailingType = trailingFragment.substring(0, 4096)
+      .match(/"type"\s*:\s*"([^"]+)"/);
+    if (trailingType && trailingType[1] !== 'session_meta') return entries;
+  }
+
   const fd = fs.openSync(filePath, 'r');
   const buffer = Buffer.alloc(64 * 1024);
   const decoder = new StringDecoder('utf8');
@@ -247,6 +302,12 @@ function readLeadingSessionMetaEntries(filePath) {
       const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
       if (bytesRead === 0) pending += decoder.end();
       else pending += decoder.write(buffer.subarray(0, bytesRead));
+
+      // A non-meta record can be arbitrarily large (for example, an embedded
+      // tool result). Its top-level type is written near the start, so stop
+      // before buffering and parsing the rest of that JSONL record.
+      const pendingType = pending.substring(0, 4096).match(/"type"\s*:\s*"([^"]+)"/);
+      if (pendingType && pendingType[1] !== 'session_meta') return entries;
 
       let newlineIndex;
       while ((newlineIndex = pending.indexOf('\n')) !== -1 || (bytesRead === 0 && pending)) {
@@ -454,10 +515,10 @@ function walkSessionFiles(dir) {
   return results;
 }
 
-function loadSessionQuick(filePath) {
-  const stat = fs.statSync(filePath);
+function loadSessionQuick(filePath, options = {}) {
+  const stat = options.stat || fs.statSync(filePath);
   const sessionLabel = path.basename(filePath, '.jsonl');
-  const headText = readHeadText(filePath);
+  const headText = options.headText || readHeadText(filePath, 256 * 1024, stat);
 
   let sessionId = sessionLabel;
   let firstTs = null;
@@ -487,29 +548,31 @@ function loadSessionQuick(filePath) {
     }
   }
 
-  const firstLine = readFirstLine(filePath);
-  if (firstLine) {
+  const canonicalMetaEntry = options.canonicalMetaEntry || (() => {
+    const firstLine = readFirstLine(filePath);
+    if (!firstLine) return null;
     try {
-      const metaEntry = JSON.parse(firstLine);
-      if (metaEntry.type === 'session_meta') {
-        const payload = metaEntry.payload || {};
-        sessionId = payload.id || sessionLabel;
-        firstTs = payload.timestamp || metaEntry.timestamp || null;
-        cwd = payload.cwd || '';
-        version = payload.cli_version || '';
-        modelProvider = payload.model_provider || '';
-        source = payload.source || '';
-        originator = payload.originator || '';
-        forkedFromId = payload.forked_from_id || '';
-        threadSource = payload.thread_source || '';
-      }
+      return JSON.parse(firstLine);
     } catch (_) { /* ignore */ }
+    return null;
+  })();
+  if (canonicalMetaEntry && canonicalMetaEntry.type === 'session_meta') {
+    const payload = canonicalMetaEntry.payload || {};
+    sessionId = payload.id || sessionLabel;
+    firstTs = payload.timestamp || canonicalMetaEntry.timestamp || null;
+    cwd = payload.cwd || '';
+    version = payload.cli_version || '';
+    modelProvider = payload.model_provider || '';
+    source = payload.source || '';
+    originator = payload.originator || '';
+    forkedFromId = payload.forked_from_id || '';
+    threadSource = payload.thread_source || '';
   }
 
   // Fork history begins with one session_meta per inherited generation. Read
   // that contiguous prefix without a byte cap so deep edit chains retain
   // enough ancestry to survive deletion of intermediate rollout files.
-  for (const metaEntry of readLeadingSessionMetaEntries(filePath)) {
+  for (const metaEntry of readLeadingSessionMetaEntries(filePath, headText)) {
     const payload = metaEntry.payload || {};
     for (const candidate of [payload.id, payload.forked_from_id]) {
       if (candidate && candidate !== sessionId && !ancestorIds.includes(candidate)) {
@@ -532,7 +595,7 @@ function loadSessionQuick(filePath) {
     } catch (_) { /* ignore */ }
   }
 
-  if (stat.size > headText.length) {
+  if (stat.size > Buffer.byteLength(headText)) {
     for (const line of readTailText(filePath).split('\n').filter(Boolean)) {
       try {
         const entry = JSON.parse(line);
@@ -540,23 +603,6 @@ function loadSessionQuick(filePath) {
         if (ts) lastTs = ts;
         const titleUpdate = getCustomTitleUpdate(entry);
         if (titleUpdate !== null) customTitle = titleUpdate;
-      } catch (_) { /* ignore */ }
-    }
-  }
-
-  if (!firstUserMsg) {
-    firstUserMsg = '';
-    userMsgCount = 0;
-    assistantMsgCount = 0;
-    quickMessages = [];
-    const fullLines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
-    for (const line of fullLines) {
-      try {
-        const entry = JSON.parse(line);
-        const ts = getEntryTimestamp(entry);
-        if (!firstTs && ts) firstTs = ts;
-        if (ts) lastTs = ts;
-        countMessage(entry);
       } catch (_) { /* ignore */ }
     }
   }
@@ -576,7 +622,7 @@ function loadSessionQuick(filePath) {
   return {
     sessionId,
     project: getProjectDisplayName(cwd),
-    topic: trimTopic(firstUserMsg) || '(no user messages)',
+    topic: trimTopic(firstUserMsg) || PENDING_TOPIC,
     customTitle,
     firstTs,
     lastTs: lastTs || firstTs,
@@ -594,6 +640,8 @@ function loadSessionQuick(filePath) {
     estimatedMessages,
     filePath,
     _detailLoaded: false,
+    _topicPending: !firstUserMsg,
+    _searchIndexed: false,
   };
 }
 
@@ -706,7 +754,7 @@ function collectSessionSearchEntry(entry, userInputs, finalAnswers) {
   }
 }
 
-async function buildSessionSearchText(session, options = {}) {
+async function buildSessionSearchData(session, options = {}) {
   const userInputs = new Set();
   const finalAnswers = new Set();
   const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
@@ -731,7 +779,15 @@ async function buildSessionSearchText(session, options = {}) {
     } catch (_) { /* ignore malformed lines */ }
   }
 
-  return [...userInputs, ...finalAnswers].join('\n').toLowerCase();
+  return {
+    searchText: [...userInputs, ...finalAnswers].join('\n').toLowerCase(),
+    firstUserMessage: userInputs.values().next().value || '',
+  };
+}
+
+async function buildSessionSearchText(session, options = {}) {
+  const data = await buildSessionSearchData(session, options);
+  return data && data.searchText;
 }
 
 function indexSessionsInBackground(sessions, options = {}) {
@@ -749,18 +805,26 @@ function indexSessionsInBackground(sessions, options = {}) {
     }
 
     const session = sessions[nextIndex++];
+    let indexedSuccessfully = false;
     try {
-      const searchText = await buildSessionSearchText(session, {
+      const searchData = await buildSessionSearchData(session, {
         isCancelled: () => cancelled,
       });
       if (cancelled) return;
-      session.searchText = searchText || '';
+      session.searchText = (searchData && searchData.searchText) || '';
+      if (session._topicPending) {
+        session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
+        session._topicPending = false;
+        session._summaryChangedDuringIndex = true;
+        if (!searchData || !searchData.firstUserMessage) session._excludeFromList = true;
+      }
       session._searchIndexError = null;
+      indexedSuccessfully = true;
     } catch (error) {
       session.searchText = '';
       session._searchIndexError = error;
     }
-    session._searchIndexed = true;
+    session._searchIndexed = indexedSuccessfully;
     onSessionIndexed(session, nextIndex, sessions.length);
     schedule(indexNextSession);
   }
@@ -779,17 +843,139 @@ function isInteractiveSession(session) {
     && !threadSource.toLowerCase().includes('subagent');
 }
 
-function loadAllSessions() {
+function cacheFingerprintMatches(record, stat) {
+  return record
+    && record.size === stat.size
+    && record.mtimeMs === stat.mtimeMs;
+}
+
+function serializeSessionForCache(session) {
+  const cached = {};
+  const fields = [
+    'sessionId', 'project', 'topic', 'customTitle', 'firstTs', 'lastTs',
+    'version', 'gitBranch', 'cwd', 'source', 'originator', 'forkedFromId',
+    'threadSource', 'ancestorIds', 'modelProvider', 'duration',
+    'estimatedMessages', 'searchText',
+  ];
+  for (const field of fields) {
+    if (session[field] !== undefined) cached[field] = session[field];
+  }
+  cached.topicPending = Boolean(session._topicPending);
+  cached.searchIndexed = Boolean(session._searchIndexed);
+  return cached;
+}
+
+function deserializeSessionFromCache(filePath, stat, cached) {
+  return {
+    ...cached,
+    fileSize: stat.size,
+    filePath,
+    _detailLoaded: false,
+    _topicPending: Boolean(cached.topicPending),
+    _searchIndexed: Boolean(cached.searchIndexed),
+  };
+}
+
+function makeSessionCacheRecord(stat, session = null) {
+  return {
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    included: Boolean(session && !session._excludeFromList),
+    ...(session && !session._excludeFromList
+      ? { session: serializeSessionForCache(session) }
+      : {}),
+  };
+}
+
+function readCanonicalSessionMeta(filePath) {
+  const firstLine = readFirstLine(filePath);
+  if (!firstLine) return null;
+  try {
+    const entry = JSON.parse(firstLine);
+    return entry.type === 'session_meta' ? entry : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function sessionClassificationFromMeta(entry) {
+  const payload = (entry && entry.payload) || {};
+  return {
+    source: payload.source || '',
+    originator: payload.originator || '',
+    threadSource: payload.thread_source || '',
+  };
+}
+
+function updateSessionCacheRecord(sessions, session) {
+  const context = sessionCacheContexts.get(sessions);
+  if (!context || !session.filePath) return;
+  try {
+    const stat = fs.statSync(session.filePath);
+    context.cache.files[session.filePath] = makeSessionCacheRecord(stat, session);
+    context.dirty = true;
+  } catch (_) {
+    delete context.cache.files[session.filePath];
+    context.dirty = true;
+  }
+}
+
+function removeSessionCacheRecord(sessions, filePath) {
+  const context = sessionCacheContexts.get(sessions);
+  if (!context || !context.cache.files[filePath]) return;
+  delete context.cache.files[filePath];
+  context.dirty = true;
+}
+
+function flushSessionCache(sessions) {
+  const context = sessionCacheContexts.get(sessions);
+  if (!context || !context.dirty) return false;
+  if (!saveSessionCache(context.cache)) return false;
+  context.dirty = false;
+  return true;
+}
+
+function loadAllSessions(options = {}) {
   const sessions = [];
-  for (const filePath of walkSessionFiles(SESSIONS_DIR)) {
+  const useCache = options.useCache !== false;
+  const previousCache = useCache ? loadSessionCache() : emptySessionCache();
+  const nextCache = emptySessionCache();
+  const filePaths = walkSessionFiles(SESSIONS_DIR);
+  let cacheDirty = !useCache
+    || Object.keys(previousCache.files).length !== filePaths.length;
+
+  for (const filePath of filePaths) {
     try {
-      const session = loadSessionQuick(filePath);
-      if (session.firstTs && session.topic !== '(no user messages)' && isInteractiveSession(session)) {
+      const stat = fs.statSync(filePath);
+      const cachedRecord = previousCache.files[filePath];
+      if (cacheFingerprintMatches(cachedRecord, stat)) {
+        nextCache.files[filePath] = cachedRecord;
+        if (cachedRecord.included && cachedRecord.session) {
+          sessions.push(deserializeSessionFromCache(filePath, stat, cachedRecord.session));
+        }
+        continue;
+      }
+
+      cacheDirty = true;
+      const canonicalMetaEntry = readCanonicalSessionMeta(filePath);
+      if (!canonicalMetaEntry
+          || !isInteractiveSession(sessionClassificationFromMeta(canonicalMetaEntry))) {
+        nextCache.files[filePath] = makeSessionCacheRecord(stat);
+        continue;
+      }
+
+      const session = loadSessionQuick(filePath, { stat, canonicalMetaEntry });
+      if (session.firstTs) {
         sessions.push(session);
+        nextCache.files[filePath] = makeSessionCacheRecord(stat, session);
+      } else {
+        nextCache.files[filePath] = makeSessionCacheRecord(stat);
       }
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  sessionCacheContexts.set(sessions, { cache: nextCache, dirty: cacheDirty });
+  if (useCache && cacheDirty) flushSessionCache(sessions);
   return sessions;
 }
 
@@ -1100,8 +1286,9 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let isSearchMode = false;
   let sortMode = 'time';
   let launchModeId = getDefaultLaunchMode(meta);
-  let searchIndexing = allSessions.length > 0;
+  let searchIndexing = allSessions.some(session => !session._searchIndexed);
   let pendingIndexRefresh = false;
+  let summaryRefreshPending = false;
   let indexRefreshTimer = null;
   let cancelSearchIndexing = () => {};
 
@@ -1643,8 +1830,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     return true;
   }
 
-  function refreshIndexedSearchResults() {
-    if (!filterText && !projectFilter) return;
+  function refreshIndexedSearchResults(force = false) {
+    if (!force && !filterText && !projectFilter) return;
     if (popupOpen || renameMode) {
       pendingIndexRefresh = true;
     } else {
@@ -1652,13 +1839,24 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
   }
 
-  function scheduleIndexRefresh() {
-    if ((!filterText && !projectFilter) || indexRefreshTimer) return;
+  function scheduleIndexRefresh(session) {
+    updateSessionCacheRecord(allSessions, session);
+    if (session._excludeFromList) {
+      const index = allSessions.indexOf(session);
+      if (index !== -1) allSessions.splice(index, 1);
+    }
+
+    const summaryChanged = Boolean(session._summaryChangedDuringIndex);
+    session._summaryChangedDuringIndex = false;
+    if (summaryChanged) summaryRefreshPending = true;
+    if ((!filterText && !projectFilter && !summaryChanged) || indexRefreshTimer) return;
     // Throttle rather than debounce so a continuously running index cannot
     // postpone visible search results until every transcript has finished.
     indexRefreshTimer = setTimeout(() => {
       indexRefreshTimer = null;
-      refreshIndexedSearchResults();
+      const force = summaryRefreshPending;
+      summaryRefreshPending = false;
+      refreshIndexedSearchResults(force);
     }, 50);
   }
 
@@ -2069,6 +2267,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       if (fs.existsSync(session.filePath)) {
         fs.unlinkSync(session.filePath);
       }
+      removeSessionCacheRecord(allSessions, session.filePath);
       // Clean up meta entry
       if (meta.sessions[session.sessionId]) {
         delete meta.sessions[session.sessionId];
@@ -2078,6 +2277,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
       reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
       saveMeta(meta);
+      flushSessionCache(allSessions);
       // Adjust selection. Family and visible-row state is rebuilt by the
       // caller so deleting one version can reveal a singleton family.
       if (selectedIndex >= displayRows.length) {
@@ -2340,16 +2540,20 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
-  const cancelBackgroundIndexing = indexSessionsInBackground([...allSessions], {
+  const sessionsToIndex = allSessions.filter(session => !session._searchIndexed);
+  const cancelBackgroundIndexing = indexSessionsInBackground(sessionsToIndex, {
     onSessionIndexed: scheduleIndexRefresh,
     onComplete: () => {
       searchIndexing = false;
+      flushSessionCache(allSessions);
+      const forceRefresh = summaryRefreshPending;
+      summaryRefreshPending = false;
       if (indexRefreshTimer) {
         clearTimeout(indexRefreshTimer);
         indexRefreshTimer = null;
       }
-      if (filterText || projectFilter) {
-        refreshIndexedSearchResults();
+      if (forceRefresh || filterText || projectFilter) {
+        refreshIndexedSearchResults(forceRefresh);
       } else {
         updateHeader();
         screen.render();
@@ -2358,6 +2562,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   });
   cancelSearchIndexing = () => {
     cancelBackgroundIndexing();
+    flushSessionCache(allSessions);
     if (indexRefreshTimer) {
       clearTimeout(indexRefreshTimer);
       indexRefreshTimer = null;
@@ -2403,6 +2608,7 @@ if (typeof module !== 'undefined') {
     CODEX_DIR,
     SESSIONS_DIR,
     META_FILE,
+    CACHE_FILE,
     // CLI
     detectCLI,
     getShellCommand,

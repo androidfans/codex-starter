@@ -43,6 +43,7 @@ const {
   CODEX_DIR,
   SESSIONS_DIR,
   META_FILE,
+  CACHE_FILE,
 } = mod;
 
 function writeSession(relativePath, lines) {
@@ -66,6 +67,7 @@ describe('paths', () => {
     assert.equal(CODEX_DIR, path.join(tmpHome, '.codex'));
     assert.equal(SESSIONS_DIR, path.join(tmpHome, '.codex', 'sessions'));
     assert.equal(META_FILE, path.join(tmpHome, '.codex', 'codex-starter-meta.json'));
+    assert.equal(CACHE_FILE, path.join(tmpHome, '.codex', 'codex-starter-cache.json'));
   });
 });
 
@@ -723,6 +725,157 @@ describe('session parsing', () => {
     assert.ok(ids.includes('sess-quick'));
     assert.ok(ids.includes('sess-old'));
     assert.ok(!ids.includes('sess-detail'));
+  });
+
+  it('defers a topic beyond the quick-read window without reading the whole file', async () => {
+    const filePath = writeSession('2026/04/13/rollout-late-topic.jsonl', [
+      {
+        timestamp: '2026-04-13T06:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-late-topic',
+          timestamp: '2026-04-13T06:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-late-topic',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: `<environment_context>${'x'.repeat(300 * 1024)}` }],
+        },
+      },
+      {
+        timestamp: '2026-04-13T06:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'topic discovered asynchronously' },
+      },
+    ]);
+
+    const originalReadFileSync = fs.readFileSync;
+    fs.readFileSync = function(target, ...args) {
+      if (target === filePath) throw new Error('quick loading must not read the whole rollout');
+      return originalReadFileSync.call(this, target, ...args);
+    };
+    let session;
+    try {
+      session = loadSessionQuick(filePath);
+    } finally {
+      fs.readFileSync = originalReadFileSync;
+    }
+
+    assert.equal(session.topic, '(loading topic…)');
+    const scheduled = [];
+    indexSessionsInBackground([session], { schedule: callback => scheduled.push(callback) });
+    await scheduled.shift()();
+    assert.equal(session.topic, 'topic discovered asynchronously');
+    assert.equal(session._topicPending, false);
+  });
+
+  it('filters non-interactive rollouts after reading only their canonical metadata', () => {
+    const filePath = writeSession('2026/04/13/rollout-prefiltered-exec.jsonl', [
+      {
+        timestamp: '2026-04-13T07:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-prefiltered-exec',
+          timestamp: '2026-04-13T07:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-prefilter',
+          source: 'exec',
+          originator: 'codex_exec',
+        },
+      },
+      { type: 'response_item', payload: { output: 'x'.repeat(300 * 1024) } },
+    ]);
+
+    const originalOpenSync = fs.openSync;
+    let sessionOpens = 0;
+    fs.openSync = function(target, ...args) {
+      if (target === filePath) sessionOpens++;
+      return originalOpenSync.call(this, target, ...args);
+    };
+    let sessions;
+    try {
+      sessions = loadAllSessions();
+    } finally {
+      fs.openSync = originalOpenSync;
+    }
+
+    assert.equal(sessionOpens, 1);
+    assert.ok(!sessions.some(session => session.sessionId === 'sess-prefiltered-exec'));
+    assert.equal(JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath].included, false);
+  });
+
+  it('reuses unchanged cached summaries and invalidates changed files', () => {
+    const filePath = writeSession('2026/04/13/rollout-cached.jsonl', [
+      {
+        timestamp: '2026-04-13T08:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-cached',
+          timestamp: '2026-04-13T08:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-13T08:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'cached session topic' },
+      },
+    ]);
+    loadAllSessions();
+
+    const originalOpenSync = fs.openSync;
+    let sessionOpens = 0;
+    fs.openSync = function(target, ...args) {
+      if (target === filePath) sessionOpens++;
+      return originalOpenSync.call(this, target, ...args);
+    };
+    try {
+      const cachedSessions = loadAllSessions();
+      assert.ok(cachedSessions.some(session => session.sessionId === 'sess-cached'));
+      assert.equal(sessionOpens, 0);
+
+      fs.appendFileSync(filePath, `\n${JSON.stringify({
+        timestamp: '2026-04-13T08:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'cache invalidated' },
+      })}`);
+      loadAllSessions();
+      assert.ok(sessionOpens > 0);
+    } finally {
+      fs.openSync = originalOpenSync;
+    }
+  });
+
+  it('rebuilds a corrupt cache and prunes deleted rollouts', () => {
+    const filePath = writeSession('2026/04/13/rollout-cache-prune.jsonl', [
+      {
+        timestamp: '2026-04-13T09:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-cache-prune',
+          timestamp: '2026-04-13T09:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'prune me' } },
+    ]);
+    loadAllSessions();
+    assert.ok(JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath]);
+
+    fs.unlinkSync(filePath);
+    fs.writeFileSync(CACHE_FILE, '{broken cache');
+    assert.doesNotThrow(() => loadAllSessions());
+    const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+    assert.equal(rebuilt.version, 1);
+    assert.equal(rebuilt.files[filePath], undefined);
   });
 });
 

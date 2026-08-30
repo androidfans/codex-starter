@@ -387,6 +387,14 @@ describe('codex starter tui', () => {
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
   });
 
+  it('persists completed search indexes for warm startup', () => {
+    const cachedSessions = mod.loadAllSessions();
+    const session = cachedSessions.find(candidate => candidate.sessionId === 'sess-a');
+    assert.equal(session._searchIndexed, true);
+    assert.match(session.searchText, /release-summary-marker/);
+    assert.equal(cachedSessions.every(candidate => candidate._searchIndexed), true);
+  });
+
   it('expands and collapses fork families with arrow keys', () => {
     triggerKeypress(null, 'escape');
     triggerScreenKey('home');
