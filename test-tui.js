@@ -349,8 +349,9 @@ before(async () => {
   assert.match(widgets.header.getContent(), /indexing search/);
   // Initial render happens synchronously; search indexing starts on the next
   // event-loop turn and streams each transcript without blocking the TUI.
-  for (let attempt = 0; attempt < 100 && /indexing search/.test(widgets.header.getContent()); attempt++) {
-    await new Promise(resolve => setImmediate(resolve));
+  const indexingDeadline = Date.now() + 5000;
+  while (/indexing search/.test(widgets.header.getContent()) && Date.now() < indexingDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.doesNotMatch(widgets.header.getContent(), /indexing search/);
 });
