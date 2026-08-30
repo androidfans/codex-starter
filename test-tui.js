@@ -41,7 +41,7 @@ writeSession('rollout-a.jsonl', [
   {
     timestamp: '2026-04-13T02:47:52.000Z',
     type: 'event_msg',
-    payload: { type: 'agent_message', message: 'On it.' },
+    payload: { type: 'agent_message', message: 'On it. See docs/{spec,history}.md' },
   },
   {
     timestamp: '2026-04-13T02:47:53.000Z',
@@ -443,7 +443,7 @@ describe('codex starter tui', () => {
     assert.ok(codexPreviewCount <= userPreviewCount);
     assert.match(
       widgets.detailMessages.getContent(),
-      /On it\.\{\/\}\n\n .*You >\{\/\} extra prompt 01/,
+      /On it\. See docs\/\{open\}spec,history\{close\}\.md\{\/\}\n\n .*You >\{\/\} extra prompt 01/,
     );
     triggerScreenKey('left');
   });

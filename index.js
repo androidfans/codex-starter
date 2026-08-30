@@ -1035,7 +1035,9 @@ function getProjectColor(projectName, colorMap) {
 }
 
 function esc(text) {
-  return text.replace(/\{/g, '\\{');
+  // blessed does not treat a backslash before "{" as an escape. Use its
+  // literal-brace tags so user/session text can never be parsed as styling.
+  return String(text).replace(/[{}]/g, char => char === '{' ? '{open}' : '{close}');
 }
 
 function copyToClipboard(text) {
@@ -1151,9 +1153,9 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
     const launchMode = `{#ff5d73-fg}[${getLaunchMode(launchModeId).label}]{/}`;
     const search = isSearchMode
-      ? `{#ffb347-fg}/ ${filterText}▌{/}`
-      : (filterText ? `{#ffb347-fg}/ ${filterText}{/}` : '');
-    const project = projectFilter ? `{#5ad1e6-fg}[${projectFilter}]{/}` : '';
+      ? `{#ffb347-fg}/ ${esc(filterText)}▌{/}`
+      : (filterText ? `{#ffb347-fg}/ ${esc(filterText)}{/}` : '');
+    const project = projectFilter ? `{#5ad1e6-fg}[${esc(projectFilter)}]{/}` : '';
     let parts = [title, count, proj];
     parts.push(sort);
     parts.push(launchMode);
@@ -1264,7 +1266,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     return displayRows.map((row) => {
       const session = row.session;
       const color = getProjectColor(session.project, projectColorMap);
-      const proj = `{${color}-fg}${session.project.substring(0, 14).padEnd(14)}{/}`;
+      const proj = `{${color}-fg}${esc(session.project.substring(0, 14).padEnd(14))}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(18)}{/}`;
       const msgs = `{#ff7a1a-fg}${String(session.estimatedMessages).padStart(4)}{/}{#8a8178-fg}msg{/}`;
       const size = `{#8a8178-fg}${formatFileSize(session.fileSize).padStart(6)}{/}`;
@@ -1274,7 +1276,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       topic = truncateDisplayText(topic, topicMaxLen);
 
       const branch = session.gitBranch
-        ? `{#5bd1b9-fg}${session.gitBranch.substring(0, 25)}{/}`
+        ? `{#5bd1b9-fg}${esc(session.gitBranch.substring(0, 25))}{/}`
         : '';
       const dur = session.duration ? `{#8a8178-fg}${session.duration}{/}` : '';
 
@@ -1317,7 +1319,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         : 0;
       const compactFamily = row.kind === 'family' && listW < 60;
       const projectWidth = Math.max(7, 12 - Math.max(0, markerWidth - 2));
-      const proj = `{${color}-fg}${session.project.substring(0, projectWidth).padEnd(projectWidth)}{/}`;
+      const proj = `{${color}-fg}${esc(session.project.substring(0, projectWidth).padEnd(projectWidth))}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
 
       const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
@@ -1466,8 +1468,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const launchCommand = buildCodexCommand({ modeId: launchModeId });
       const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
       const metaContent = ` {#a3e635-fg}{bold}Start a New Conversation{/}\n${sep}`
-        + `\n {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${process.cwd()}{/}`
-        + `\n {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${cli}{/}`
+        + `\n {#8a8178-fg}Working Dir{/}  {#5ad1e6-fg}${esc(process.cwd())}{/}`
+        + `\n {#8a8178-fg}CLI{/}          {#5bd1b9-fg}${esc(cli)}{/}`
         + `\n {#8a8178-fg}Launch Mode{/}  {#ff5d73-fg}${launchMode.label}{/}`
         + `\n {#8a8178-fg}Command{/}      {#8a8178-fg}${launchCommand}{/}`;
       const messagesContent = `\n {#e7dccf-fg}Open a fresh Codex session and start{/}`
@@ -1502,17 +1504,17 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     const selectedTitle = familyTitle || session.customTitle || '';
 
     // Title
-    metaContent += ` {${color}-fg}{bold}█ ${session.project}{/}\n`;
+    metaContent += ` {${color}-fg}{bold}█ ${esc(session.project)}{/}\n`;
     if (selectedTitle) {
       metaContent += ` {#5bd1b9-fg}{bold}${esc(selectedTitle)}{/}\n`;
     }
     metaContent += sep + '\n\n';
 
     const fields = [
-      ['Session', `{#5ad1e6-fg}${session.sessionId}{/}`],
+      ['Session', `{#5ad1e6-fg}${esc(session.sessionId)}{/}`],
       ['Started', `{#ffb347-fg}${session.firstTs ? new Date(session.firstTs).toLocaleString() : '?'}{/}`],
       ['Last active', `{#ffb347-fg}${session.lastTs ? new Date(session.lastTs).toLocaleString() : '?'}{/}`],
-      ['Duration', `{#a3e635-fg}${session.duration || '<1m'}{/}`],
+      ['Duration', `{#a3e635-fg}${esc(session.duration || '<1m')}{/}`],
       ['Messages', `{#ff7a1a-fg}${session.totalMessages || session.estimatedMessages}{/}`],
       ['Size', `{#ffd166-fg}${formatFileSize(session.fileSize)}{/}`],
     ];
@@ -1521,14 +1523,14 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const familyValue = selectedRow.kind === 'family'
         ? `${selectedRow.family.members.length} versions · Enter resumes latest`
         : `version ${versionIndex}/${selectedRow.family.members.length}${selectedRow.isDefault ? ' · latest' : ''}`;
-      fields.splice(1, 0, ['Family', `{#ffd166-fg}${familyValue}{/}`]);
-      if (session.forkedFromId) fields.splice(2, 0, ['Forked from', `{#8a8178-fg}${session.forkedFromId}{/}`]);
+      fields.splice(1, 0, ['Family', `{#ffd166-fg}${esc(familyValue)}{/}`]);
+      if (session.forkedFromId) fields.splice(2, 0, ['Forked from', `{#8a8178-fg}${esc(session.forkedFromId)}{/}`]);
     }
-    if (session.gitBranch) fields.push(['Branch', `{#5bd1b9-fg} ${session.gitBranch}{/}`]);
-    if (session.version) fields.push(['Codex', `{#8a8178-fg}v${session.version}{/}`]);
-    if (session.cwd) fields.push(['Directory', `{#8a8178-fg}${session.cwd}{/}`]);
-    if (session.modelProvider) fields.push(['Provider', `{#5bd1b9-fg}${session.modelProvider}{/}`]);
-    if (session.source || session.originator) fields.push(['Mode', `{#8a8178-fg}${session.source || session.originator}{/}`]);
+    if (session.gitBranch) fields.push(['Branch', `{#5bd1b9-fg} ${esc(session.gitBranch)}{/}`]);
+    if (session.version) fields.push(['Codex', `{#8a8178-fg}v${esc(session.version)}{/}`]);
+    if (session.cwd) fields.push(['Directory', `{#8a8178-fg}${esc(session.cwd)}{/}`]);
+    if (session.modelProvider) fields.push(['Provider', `{#5bd1b9-fg}${esc(session.modelProvider)}{/}`]);
+    if (session.source || session.originator) fields.push(['Mode', `{#8a8178-fg}${esc(session.source || session.originator)}{/}`]);
     fields.push(['Resume with', `{#ff5d73-fg}${launchMode.label}{/}`]);
 
     for (const [label, value] of fields) {
@@ -1537,7 +1539,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
     if (session.toolsUsed && session.toolsUsed.length > 0) {
       metaContent += `\n {#5ad1e6-fg}{bold}Tools Used{/}\n`;
-      const chips = session.toolsUsed.slice(0, 10).map(t => `{#3a3f46-fg}[{/}{#5ad1e6-fg}${t}{/}{#3a3f46-fg}]{/}`).join(' ');
+      const chips = session.toolsUsed.slice(0, 10).map(t => `{#3a3f46-fg}[{/}{#5ad1e6-fg}${esc(t)}{/}{#3a3f46-fg}]{/}`).join(' ');
       metaContent += ` ${chips}\n`;
       if (session.toolsUsed.length > 10) metaContent += ` {#8a8178-fg}+${session.toolsUsed.length - 10} more{/}\n`;
     }
@@ -1553,14 +1555,14 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       messagesContent = `\n  {#8a8178-fg}(no readable messages){/}`;
     } else {
       messages.forEach((message, index) => {
-        const clean = esc(message.replace(/\n/g, ' ').trim());
-        const trunc = clean.length > 80 ? clean.substring(0, 80) + '…' : clean;
+        const clean = message.replace(/\n/g, ' ').trim();
+        const trunc = esc(clean.length > 80 ? clean.substring(0, 80) + '…' : clean);
         // Keep each Codex response visually attached to its user turn while
         // preserving a blank line between consecutive turns.
         messagesContent += `${messagesContent ? '\n' : ''}\n {#ff7a1a-fg}{bold}You >{/} ${trunc}`;
         if (assists[index]) {
-          const aClean = esc(assists[index].replace(/\n/g, ' ').trim());
-          const aTrunc = aClean.length > 80 ? aClean.substring(0, 80) + '…' : aClean;
+          const aClean = assists[index].replace(/\n/g, ' ').trim();
+          const aTrunc = esc(aClean.length > 80 ? aClean.substring(0, 80) + '…' : aClean);
           messagesContent += `\n {#a3e635-fg}Codex >{/} {#8a8178-fg}${aTrunc}{/}`;
         }
       });
@@ -1568,7 +1570,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
     const actionContent = `${sep}`
       + `\n {#a3e635-fg}{bold}↵ Enter{/}{#a3e635-fg} to resume this conversation{/}`
-      + `\n {#8a8178-fg}${resumeCommand}{/}`
+      + `\n {#8a8178-fg}${esc(resumeCommand)}{/}`
       + `\n {#8a8178-fg}${launchMode.description}{/}`;
 
     setDetailContent(metaContent, messagesContent, actionContent, session.sessionId);
@@ -1688,10 +1690,11 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let popupOpen = false;
 
   function showProjectPicker() {
-    const projects = ['  All Projects', ...uniqueProjects.map(p => `  ${p}`)];
+    const projectLabels = ['  All Projects', ...uniqueProjects.map(p => `  ${p}`)];
+    const projects = projectLabels.map(esc);
     const popup = blessed.list({
       parent: screen, top: 'center', left: 'center',
-      width: Math.min(50, Math.max(...projects.map(p => p.length)) + 8),
+      width: Math.min(50, Math.max(...projectLabels.map(p => p.length)) + 8),
       height: Math.min(projects.length + 4, 20),
       label: ' {bold}{#ff7a1a-fg}Filter by Project{/} ',
       tags: true, border: { type: 'line' },
@@ -2099,7 +2102,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       },
       content:
         `\n  {#e7dccf-fg}${esc(topic)}{/}\n`
-        + `  {#8a8178-fg}${session.sessionId}{/}\n\n`
+        + `  {#8a8178-fg}${esc(session.sessionId)}{/}\n\n`
         + `  {#ff5d73-fg}{bold}y{/}{#e7dccf-fg} Delete  {/}{#8a8178-fg}n / Esc{/}{#e7dccf-fg} Cancel{/}`,
     });
     popupOpen = true;
@@ -2110,7 +2113,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       confirmPopup.destroy();
       popupOpen = false;
       deleteSession(session);
-      footer.setContent(`\n  {#ff5d73-fg}{bold}✗ Deleted:{/} {#8a8178-fg}${session.sessionId}{/}`);
+      footer.setContent(`\n  {#ff5d73-fg}{bold}✗ Deleted:{/} {#8a8178-fg}${esc(session.sessionId)}{/}`);
       pendingIndexRefresh = false;
       applyFilter({ preserveSelection: true });
       setTimeout(() => { updateFooter(); screen.render(); }, 1500);

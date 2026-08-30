@@ -29,6 +29,7 @@ const {
   reconcileFamilyMetaAfterDelete,
   formatTimestamp,
   formatFileSize,
+  esc,
   loadMeta,
   saveMeta,
   getSessionMeta,
@@ -95,6 +96,14 @@ describe('helpers', () => {
     assert.equal(formatFileSize(2048), '2K');
     assert.equal(formatFileSize(1048576), '1.0M');
     assert.equal(formatTimestamp(null), 'unknown');
+  });
+
+  it('escapes literal braces with blessed-compatible tags', () => {
+    assert.equal(esc('docs/{spec,history}.md'), 'docs/{open}spec,history{close}.md');
+    assert.equal(
+      esc('{red-fg}unsafe{/}'),
+      '{open}red-fg{close}unsafe{open}/{close}',
+    );
   });
 
   it('loads and persists meta', () => {
