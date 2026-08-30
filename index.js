@@ -642,6 +642,7 @@ function loadSessionQuick(filePath, options = {}) {
     _detailLoaded: false,
     _topicPending: !firstUserMsg,
     _searchIndexed: false,
+    _cacheFingerprint: { size: stat.size, mtimeMs: stat.mtimeMs },
   };
 }
 
@@ -710,7 +711,7 @@ function isSearchRelevantLine(line) {
   // can contain arbitrary JSON-like text of their own.
   const head = line.substring(0, 4096);
   if (/"type"\s*:\s*"event_msg"/.test(head)) {
-    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"(?:user_message|agent_message)"/.test(head);
+    return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"(?:user_message|agent_message|task_started|task_complete|turn_aborted)"/.test(head);
   }
   if (/"type"\s*:\s*"response_item"/.test(head)) {
     return /"payload"\s*:\s*\{[\s\S]*?"type"\s*:\s*"message"/.test(head);
@@ -757,6 +758,7 @@ function collectSessionSearchEntry(entry, userInputs, finalAnswers) {
 async function buildSessionSearchData(session, options = {}) {
   const userInputs = new Set();
   const finalAnswers = new Set();
+  const conversationMessages = [];
   const input = fs.createReadStream(session.filePath, { encoding: 'utf-8' });
   // readline buffers one complete JSONL record. That trade-off is intentional:
   // local transcript records are expected to fit in memory, including the user
@@ -776,12 +778,14 @@ async function buildSessionSearchData(session, options = {}) {
     try {
       const entry = JSON.parse(line);
       collectSessionSearchEntry(entry, userInputs, finalAnswers);
+      appendConversationEntry(conversationMessages, entry);
     } catch (_) { /* ignore malformed lines */ }
   }
 
   return {
     searchText: [...userInputs, ...finalAnswers].join('\n').toLowerCase(),
     firstUserMessage: userInputs.values().next().value || '',
+    estimatedMessages: conversationMessages.filter(message => !message.isTurnBoundary).length,
   };
 }
 
@@ -811,13 +815,7 @@ function indexSessionsInBackground(sessions, options = {}) {
         isCancelled: () => cancelled,
       });
       if (cancelled) return;
-      session.searchText = (searchData && searchData.searchText) || '';
-      if (session._topicPending) {
-        session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
-        session._topicPending = false;
-        session._summaryChangedDuringIndex = true;
-        if (!searchData || !searchData.firstUserMessage) session._excludeFromList = true;
-      }
+      applySessionSearchData(session, searchData);
       session._searchIndexError = null;
       indexedSuccessfully = true;
     } catch (error) {
@@ -832,6 +830,38 @@ function indexSessionsInBackground(sessions, options = {}) {
   // Always defer the first file so the initial TUI render completes first.
   schedule(indexNextSession);
   return () => { cancelled = true; };
+}
+
+function applySessionSearchData(session, searchData) {
+  const previousTopic = session.topic;
+  const previousCount = session.estimatedMessages;
+  session.searchText = (searchData && searchData.searchText) || '';
+  session.estimatedMessages = (searchData && searchData.estimatedMessages) || 0;
+  if (session._topicPending) {
+    session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
+    session._topicPending = false;
+    if (!searchData || !searchData.firstUserMessage) session._excludeFromList = true;
+  }
+  session._summaryChangedDuringIndex = session.topic !== previousTopic
+    || session.estimatedMessages !== previousCount;
+}
+
+async function resolvePendingSessionSummaries(sessions) {
+  for (const session of [...sessions]) {
+    if (!session._topicPending) continue;
+    try {
+      const searchData = await buildSessionSearchData(session);
+      applySessionSearchData(session, searchData);
+      session._searchIndexed = true;
+      session._searchIndexError = null;
+    } catch (error) {
+      session._searchIndexed = false;
+      session._searchIndexError = error;
+    }
+    updateSessionCacheRecord(sessions, session);
+    if (session._excludeFromList) sessions.splice(sessions.indexOf(session), 1);
+  }
+  flushSessionCache(sessions);
 }
 
 function isInteractiveSession(session) {
@@ -873,6 +903,7 @@ function deserializeSessionFromCache(filePath, stat, cached) {
     _detailLoaded: false,
     _topicPending: Boolean(cached.topicPending),
     _searchIndexed: Boolean(cached.searchIndexed),
+    _cacheFingerprint: { size: stat.size, mtimeMs: stat.mtimeMs },
   };
 }
 
@@ -912,6 +943,10 @@ function updateSessionCacheRecord(sessions, session) {
   if (!context || !session.filePath) return;
   try {
     const stat = fs.statSync(session.filePath);
+    // The summary and search text describe the snapshot seen by discovery.
+    // If an active rollout changed since then, keep the older fingerprint so
+    // the next startup reparses it instead of certifying stale data as fresh.
+    if (!cacheFingerprintMatches(session._cacheFingerprint, stat)) return;
     context.cache.files[session.filePath] = makeSessionCacheRecord(stat, session);
     context.dirty = true;
   } catch (_) {
@@ -1241,8 +1276,9 @@ function copyToClipboard(text) {
 
 // ─── CLI Mode (--list) ───────────────────────────────────────────────────────
 
-function runListMode(limit) {
+async function runListMode(limit) {
   const sessions = loadAllSessions();
+  await resolvePendingSessionSummaries(sessions);
   const display = sessions.slice(0, limit || 30);
   const C = {
     reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m',
@@ -1293,8 +1329,13 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
-  const uniqueProjects = [...new Set(allSessions.map(s => s.project))];
-  uniqueProjects.forEach(p => getProjectColor(p, projectColorMap));
+  let uniqueProjects = [];
+  function refreshUniqueProjects() {
+    uniqueProjects = [...new Set(allSessions.map(session => session.project))];
+    uniqueProjects.forEach(project => getProjectColor(project, projectColorMap));
+    if (projectFilter && !uniqueProjects.includes(projectFilter)) projectFilter = '';
+  }
+  refreshUniqueProjects();
 
   // ─── Screen ────────────────────────────────────────────────────────────
   const screen = blessed.screen({
@@ -1844,6 +1885,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (session._excludeFromList) {
       const index = allSessions.indexOf(session);
       if (index !== -1) allSessions.splice(index, 1);
+      refreshUniqueProjects();
     }
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
@@ -2583,6 +2625,8 @@ if (typeof module !== 'undefined') {
     loadSessionDetail,
     buildSessionSearchText,
     indexSessionsInBackground,
+    updateSessionCacheRecord,
+    flushSessionCache,
     isInteractiveSession,
     loadAllSessions,
     filterSessionList,
@@ -2711,11 +2755,16 @@ TUI Keyboard Shortcuts:
   if (args.includes('--list') || args.includes('-l')) {
     const limitIdx = args.indexOf('--list') !== -1 ? args.indexOf('--list') : args.indexOf('-l');
     const limit = parseInt(args[limitIdx + 1]) || 30;
-    runListMode(limit);
-    process.exit(0);
+    runListMode(limit).then(
+      () => process.exit(0),
+      (error) => {
+        console.error(`Failed to list sessions: ${error.message}`);
+        process.exit(1);
+      },
+    );
+  } else {
+    const activateInputSource = createInputSourceActivator();
+    activateInputSource();
+    createApp({ activateInputSource });
   }
-
-  const activateInputSource = createInputSourceActivator();
-  activateInputSource();
-  createApp({ activateInputSource });
 }

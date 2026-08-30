@@ -96,6 +96,20 @@ writeSession('rollout-b.jsonl', [
   },
 ]);
 
+writeSession('rollout-empty.jsonl', [
+  {
+    timestamp: '2026-04-13T02:50:00.000Z',
+    type: 'session_meta',
+    payload: {
+      id: 'sess-empty',
+      timestamp: '2026-04-13T02:50:00.000Z',
+      cwd: '/Users/test/Desktop/project-empty',
+      source: 'cli',
+      originator: 'codex-tui',
+    },
+  },
+]);
+
 writeSession('rollout-a-fork.jsonl', [
   {
     timestamp: '2026-04-13T03:00:00.000Z',
@@ -381,10 +395,13 @@ describe('codex starter tui', () => {
   it('renders Codex Starter header and list items', () => {
     assert.match(widgets.header.getContent(), /Codex Starter/);
     assert.match(widgets.header.getContent(), /conversations · 3 versions/);
+    const plainHeader = widgets.header.getContent().replace(/{(\/?)?[\w\-,;!#]*}/g, '');
+    assert.match(plainHeader, /1 projects/);
     assert.ok(widgets.list.items.some(item => item.includes('build proj')));
     assert.ok(widgets.list.items.some(item => item.includes('▸')));
     assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
+    assert.ok(!widgets.list.items.some(item => item.includes('project-empty')));
   });
 
   it('persists completed search indexes for warm startup', () => {

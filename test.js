@@ -19,6 +19,8 @@ const {
   loadSessionDetail,
   buildSessionSearchText,
   indexSessionsInBackground,
+  updateSessionCacheRecord,
+  flushSessionCache,
   isInteractiveSession,
   loadAllSessions,
   filterSessionList,
@@ -773,6 +775,50 @@ describe('session parsing', () => {
     await scheduled.shift()();
     assert.equal(session.topic, 'topic discovered asynchronously');
     assert.equal(session._topicPending, false);
+    assert.equal(session.estimatedMessages, 1);
+  });
+
+  it('resolves pending topics and excludes empty sessions before list output', async () => {
+    writeSession('2026/04/13/rollout-list-late-topic.jsonl', [
+      {
+        timestamp: '2026-04-13T06:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-list-late-topic',
+          timestamp: '2026-04-13T06:30:00.000Z',
+          cwd: '/Users/test/Desktop/project-list',
+          source: 'cli',
+        },
+      },
+      { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: `<environment_context>${'x'.repeat(300 * 1024)}` }] } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'resolved list topic' } },
+    ]);
+    writeSession('2026/04/13/rollout-list-empty.jsonl', [
+      {
+        timestamp: '2026-04-13T06:31:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-list-empty',
+          timestamp: '2026-04-13T06:31:00.000Z',
+          cwd: '/Users/test/Desktop/project-list-empty',
+          source: 'cli',
+        },
+      },
+    ]);
+
+    const originalLog = console.log;
+    const output = [];
+    console.log = value => output.push(String(value));
+    try {
+      await mod.runListMode(1000);
+    } finally {
+      console.log = originalLog;
+    }
+
+    const text = output.join('\n');
+    assert.match(text, /resolved list topic/);
+    assert.doesNotMatch(text, /loading topic/);
+    assert.doesNotMatch(text, /project-list-empty/);
   });
 
   it('filters non-interactive rollouts after reading only their canonical metadata', () => {
@@ -851,6 +897,41 @@ describe('session parsing', () => {
     } finally {
       fs.openSync = originalOpenSync;
     }
+  });
+
+  it('does not attach indexed data to a newer rollout fingerprint', async () => {
+    const filePath = writeSession('2026/04/13/rollout-index-race.jsonl', [
+      {
+        timestamp: '2026-04-13T08:30:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-index-race',
+          timestamp: '2026-04-13T08:30:00.000Z',
+          cwd: '/Users/test/Desktop/project-cache',
+          source: 'cli',
+        },
+      },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'original indexed text' } },
+    ]);
+    const sessions = loadAllSessions();
+    const session = sessions.find(candidate => candidate.sessionId === 'sess-index-race');
+    const originalSize = fs.statSync(filePath).size;
+    fs.appendFileSync(filePath, `\n${JSON.stringify({
+      type: 'event_msg',
+      payload: { type: 'agent_message', message: 'appended during indexing' },
+    })}`);
+
+    const scheduled = [];
+    indexSessionsInBackground([session], { schedule: callback => scheduled.push(callback) });
+    await scheduled.shift()();
+    updateSessionCacheRecord(sessions, session);
+    flushSessionCache(sessions);
+
+    const staleRecord = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath];
+    assert.equal(staleRecord.size, originalSize);
+    loadAllSessions();
+    const refreshedRecord = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files[filePath];
+    assert.equal(refreshedRecord.size, fs.statSync(filePath).size);
   });
 
   it('rebuilds a corrupt cache and prunes deleted rollouts', () => {
