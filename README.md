@@ -67,6 +67,7 @@ Session summaries and completed search indexes are cached in `~/.codex/codex-sta
 - Project filter with `p`
 - Fork families collapsed into one row, with Finder-style expansion
 - Full conversation history in an independently scrollable preview
+- Codex AI-generated conversation titles, with graceful fallback to the first prompt
 - Cached startup that only reparses new or changed rollouts
 - Automatically switches macOS to the ABC input source on startup and focus
 - Resume selected session with `Enter`
@@ -158,6 +159,7 @@ codex-starter
 | ✏️ | **重命名** | `r` 给会话起一个更容易记住的标题 |
 | 🗑️ | **删除会话** | `x` / `Delete` 删除本地 JSONL 会话 |
 | 📋 | **详情预览** | 显示目录、模式、消息、工具调用 |
+| ✨ | **AI 标题** | 优先显示 Codex 生成的会话标题，不可用时回退到首条消息 |
 | 🚀 | **增量启动** | 只重新解析新增或发生变化的 rollout |
 | 🔀 | **多种排序** | 时间 / 大小 / 消息数 / 项目 |
 | 📎 | **复制 ID** | `c` 复制 session id |
