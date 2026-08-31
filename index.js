@@ -127,6 +127,60 @@ const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
 const sessionCacheContexts = new WeakMap();
 
+function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
+  try {
+    return fs.readdirSync(codexDir, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /^state_\d+\.sqlite$/.test(entry.name))
+      .map(entry => ({
+        path: path.join(codexDir, entry.name),
+        version: Number(entry.name.match(/^state_(\d+)\.sqlite$/)[1]),
+      }))
+      .sort((a, b) => b.version - a.version)[0]?.path || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+function loadCodexThreadNames({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
+  const databasePath = findLatestCodexStateDatabase(codexDir);
+  if (!databasePath) return new Map();
+
+  try {
+    const result = runCommand('sqlite3', [
+      '-readonly',
+      '-json',
+      databasePath,
+      "SELECT id, name FROM threads WHERE name IS NOT NULL AND trim(name) <> '';",
+    ], {
+      encoding: 'utf-8',
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    if (result.error || result.status !== 0) return new Map();
+
+    const rows = JSON.parse(String(result.stdout || '[]') || '[]');
+    return new Map(rows
+      .filter(row => row && typeof row.id === 'string' && typeof row.name === 'string')
+      .map(row => [row.id, row.name.trim()])
+      .filter(([, name]) => name));
+  } catch (_) {
+    // AI titles are an optional enhancement. Older Codex versions and Linux
+    // systems without the sqlite3 CLI continue to use the first user message.
+    return new Map();
+  }
+}
+
+function applyCodexThreadNames(sessions, threadNames = loadCodexThreadNames()) {
+  for (const session of sessions) {
+    session.aiTitle = threadNames.get(session.sessionId) || '';
+  }
+  return sessions;
+}
+
+function getSessionDisplayTitle(session) {
+  return session.customTitle || session.aiTitle || session.topic || '';
+}
+
 // ─── Session Meta ────────────────────────────────────────────────────
 // Stores user-defined metadata for sessions in a simple JSON file.
 
@@ -1031,6 +1085,10 @@ function loadAllSessions(options = {}) {
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  applyCodexThreadNames(
+    sessions,
+    options.threadNames === undefined ? loadCodexThreadNames() : options.threadNames,
+  );
   sessionCacheContexts.set(sessions, { cache: nextCache, dirty: cacheDirty });
   if (useCache && cacheDirty) flushSessionCache(sessions);
   return sessions;
@@ -1042,6 +1100,7 @@ function sessionMatchesFilter(session, terms, projectFilter = '', additionalText
   const metadataHaystack = [
     session.project,
     session.topic,
+    session.aiTitle || '',
     session.customTitle || '',
     session.gitBranch || '',
     session.sessionId,
@@ -1316,7 +1375,7 @@ async function runListMode(limit) {
   console.log(`${C.dim}${'─'.repeat(110)}${C.reset}`);
   display.forEach((s, i) => {
     const mode = (s.source || s.originator || 'unknown').substring(0, 9);
-    console.log(`${C.dim}${`${i+1}`.padStart(3)}${C.reset}  ${C.yellow}${formatTimestamp(s.lastTs).padEnd(18)}${C.reset} ${C.magenta}${s.project.substring(0,23).padEnd(24)}${C.reset} ${C.green}${mode.padEnd(10)}${C.reset} ${C.blue}${`${s.estimatedMessages}`.padStart(5)}${C.reset}  ${C.dim}${formatFileSize(s.fileSize).padStart(6)}${C.reset}  ${C.white}${s.topic.substring(0,42)}${C.reset}`);
+    console.log(`${C.dim}${`${i+1}`.padStart(3)}${C.reset}  ${C.yellow}${formatTimestamp(s.lastTs).padEnd(18)}${C.reset} ${C.magenta}${s.project.substring(0,23).padEnd(24)}${C.reset} ${C.green}${mode.padEnd(10)}${C.reset} ${C.blue}${`${s.estimatedMessages}`.padStart(5)}${C.reset}  ${C.dim}${formatFileSize(s.fileSize).padStart(6)}${C.reset}  ${C.white}${getSessionDisplayTitle(s).substring(0,42)}${C.reset}`);
   });
   console.log(`${C.dim}${'─'.repeat(110)}${C.reset}`);
   console.log(`\n${C.dim}Resume: ${C.cyan}${CLI.name} resume <session-id>${C.reset}\n`);
@@ -1523,7 +1582,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const size = `{#8a8178-fg}${formatFileSize(session.fileSize).padStart(6)}{/}`;
 
       const topicMaxLen = Math.max(20, listW - 2);
-      let topic = session.topic;
+      let topic = getSessionDisplayTitle(session);
       topic = truncateDisplayText(topic, topicMaxLen);
 
       const branch = session.gitBranch
@@ -1577,8 +1636,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
       const topicMaxLen = Math.max(0, listW - fixedLen);
       const familyTitle = getFamilyTitleForRow(meta, row);
-      const hasCustomTitle = Boolean(familyTitle || session.customTitle);
-      let topic = familyTitle || session.customTitle || session.topic;
+      const hasCustomTitle = Boolean(familyTitle || session.customTitle || session.aiTitle);
+      let topic = familyTitle || getSessionDisplayTitle(session);
 
       if (topic.length > topicMaxLen) {
         topic = topicMaxLen > 1 ? topic.substring(0, topicMaxLen - 1) + '…' : '';
@@ -1752,7 +1811,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     let metaContent = '';
     const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
     const familyTitle = getFamilyTitleForRow(meta, selectedRow);
-    const selectedTitle = familyTitle || session.customTitle || '';
+    const selectedTitle = familyTitle || session.customTitle || session.aiTitle || '';
 
     // Title
     metaContent += ` {${color}-fg}{bold}█ ${esc(session.project)}{/}\n`;
@@ -2364,7 +2423,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   }
 
   function showDeleteConfirm(session) {
-    const topic = (session.customTitle || session.topic || '').substring(0, 30);
+    const topic = getSessionDisplayTitle(session).substring(0, 30);
     const confirmPopup = blessed.box({
       parent: screen, top: 'center', left: 'center',
       width: 50, height: 9,
@@ -2658,6 +2717,10 @@ if (typeof module !== 'undefined') {
     extractUserText,
     loadSessionQuick,
     loadSessionDetail,
+    findLatestCodexStateDatabase,
+    loadCodexThreadNames,
+    applyCodexThreadNames,
+    getSessionDisplayTitle,
     buildSessionSearchText,
     indexSessionsInBackground,
     updateSessionCacheRecord,

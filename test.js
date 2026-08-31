@@ -17,6 +17,10 @@ const {
   extractUserText,
   loadSessionQuick,
   loadSessionDetail,
+  findLatestCodexStateDatabase,
+  loadCodexThreadNames,
+  applyCodexThreadNames,
+  getSessionDisplayTitle,
   buildSessionSearchText,
   indexSessionsInBackground,
   updateSessionCacheRecord,
@@ -115,6 +119,51 @@ describe('helpers', () => {
     const meta = loadMeta();
     assert.equal(getSessionMeta(meta, 'abc').customTitle, 'Pinned');
     assert.deepEqual(getSessionMeta(meta, 'missing'), {});
+  });
+
+  it('loads AI-generated thread names from the newest Codex state database', () => {
+    const olderDatabase = path.join(CODEX_DIR, 'state_3.sqlite');
+    const newestDatabase = path.join(CODEX_DIR, 'state_5.sqlite');
+    fs.writeFileSync(olderDatabase, '');
+    fs.writeFileSync(newestDatabase, '');
+    const calls = [];
+
+    const names = loadCodexThreadNames({
+      runCommand(command, args, options) {
+        calls.push({ command, args, options });
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            { id: 'thread-a', name: ' Fix login redirect ' },
+            { id: 'thread-empty', name: ' ' },
+          ]),
+        };
+      },
+    });
+
+    assert.equal(findLatestCodexStateDatabase(), newestDatabase);
+    assert.equal(calls[0].command, 'sqlite3');
+    assert.equal(calls[0].args[2], newestDatabase);
+    assert.equal(names.get('thread-a'), 'Fix login redirect');
+    assert.equal(names.has('thread-empty'), false);
+
+    fs.unlinkSync(olderDatabase);
+    fs.unlinkSync(newestDatabase);
+  });
+
+  it('prefers manual titles, then Codex AI titles, then the first prompt', () => {
+    const sessions = [
+      { sessionId: 'a', topic: 'raw prompt' },
+      { sessionId: 'b', topic: 'other prompt', customTitle: 'Manual title' },
+    ];
+    applyCodexThreadNames(sessions, new Map([
+      ['a', 'Generated title'],
+      ['b', 'Ignored generated title'],
+    ]));
+
+    assert.equal(getSessionDisplayTitle(sessions[0]), 'Generated title');
+    assert.equal(getSessionDisplayTitle(sessions[1]), 'Manual title');
+    assert.equal(getSessionDisplayTitle({ topic: 'Fallback prompt' }), 'Fallback prompt');
   });
 
   it('loads and persists the default launch mode', () => {
@@ -715,6 +764,17 @@ describe('session parsing', () => {
     assert.deepEqual(filterSessionList(sessions, 'checklist'), sessions);
     assert.deepEqual(filterSessionList(sessions, 'transcript-only'), sessions);
     assert.deepEqual(filterSessionList(sessions, 'checklist marker'), sessions);
+  });
+
+  it('searches Codex AI-generated titles', () => {
+    const sessions = [{
+      sessionId: 'alpha',
+      project: 'project-alpha',
+      topic: 'raw first prompt',
+      aiTitle: 'Diagnose checkout latency',
+    }];
+
+    assert.deepEqual(filterSessionList(sessions, 'checkout latency'), sessions);
   });
 
   it('classifies exec runs as non-interactive sessions', () => {
