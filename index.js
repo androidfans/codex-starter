@@ -22,6 +22,8 @@ const { StringDecoder } = require('string_decoder');
 const { spawn, execSync, spawnSync } = require('child_process');
 const os = require('os');
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+
 const APP_NAME = 'Codex Starter';
 const LAUNCH_MODES = [
   { id: 'default', label: 'Default', description: 'Use your Codex config defaults', args: [] },
@@ -1239,6 +1241,8 @@ function buildSessionFamilies(sessions) {
       memberById: new Map(members.map(member => [member.sessionId, member])),
       childrenById,
       parentById,
+      roots,
+      hasSurvivingOriginal: memberIds.has(familyId),
       defaultSession,
       lastTs: defaultSession.lastTs || defaultSession.firstTs,
       hasForks: members.length > 1,
@@ -1354,7 +1358,7 @@ function buildVisibleSessionRows(
           branchSiblingCount,
           isExpanded: false,
           isDefault: segment.some(item => item.member === family.defaultSession),
-          isRoot: isRootSegment,
+          isRoot: segment.some(item => item.member.sessionId === family.familyId),
         });
       } else {
 
@@ -1389,7 +1393,7 @@ function buildVisibleSessionRows(
             branchOrdinal: isFirst ? branchOrdinal : 0,
             branchSiblingCount,
             isDefault: segmentMember === family.defaultSession,
-            isRoot: segmentMember === family.root,
+            isRoot: segmentMember.sessionId === family.familyId,
           });
         });
       }
@@ -1406,9 +1410,20 @@ function buildVisibleSessionRows(
       });
     }
 
-    appendLinearSegment(family.root, [false], 0, true);
-    // Broken or cyclic input should remain accessible even if it cannot be
-    // reached from the selected root.
+    const rootSegments = family.roots.length > 0 ? family.roots : [family.root];
+    rootSegments.forEach((rootSegment, index) => {
+      const hasSiblingRoots = rootSegments.length > 1;
+      appendLinearSegment(
+        rootSegment,
+        [hasSiblingRoots && index < rootSegments.length - 1],
+        0,
+        !hasSiblingRoots,
+        hasSiblingRoots ? index + 1 : 0,
+        rootSegments.length,
+      );
+    });
+    // Cyclic or otherwise malformed members remain accessible even when no
+    // structural root can reach them.
     for (const member of family.members) {
       if (!visited.has(member.sessionId)) appendLinearSegment(member, [false], 0, true);
     }
@@ -1439,9 +1454,8 @@ function formatDay(ts) {
 }
 
 function formatFamilySpan(family) {
-  const hasSurvivingOriginal = family.memberById.has(family.familyId);
   const chronological = family.members
-    .filter(member => !hasSurvivingOriginal || member !== family.root)
+    .filter(member => !family.hasSurvivingOriginal || member !== family.root)
     .map(member => member.firstTs || member.lastTs)
     .filter(Boolean)
     .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
@@ -1475,7 +1489,10 @@ function truncateDisplayText(text, maxLength) {
   if (maxLength <= 0) return '';
   if (stringWidth(value) <= maxLength) return value;
   if (maxLength < stringWidth('…')) return '';
-  const characters = Array.from(value);
+  const characters = Array.from(
+    graphemeSegmenter.segment(value),
+    part => part.segment,
+  );
   let low = 0;
   let high = characters.length;
   while (low < high) {
@@ -1493,8 +1510,7 @@ function formatBranchOrdinal(ordinal) {
 }
 
 function getFamilyForkCount(family) {
-  const hasSurvivingOriginal = family.memberById.has(family.familyId);
-  return Math.max(1, family.members.length - (hasSurvivingOriginal ? 1 : 0));
+  return Math.max(1, family.members.length - (family.hasSurvivingOriginal ? 1 : 0));
 }
 
 function getVersionLabelText(row) {

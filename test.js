@@ -113,6 +113,7 @@ describe('helpers', () => {
 
   it('truncates long and wide titles by terminal display width', () => {
     assert.equal(truncateDisplayText('你好世界', 5), '你好…');
+    assert.equal(truncateDisplayText('👨‍👩‍👧‍👦abc', 3), '👨‍👩‍👧‍👦…');
     assert.equal(truncateDisplayText('a'.repeat(10000), 10), 'a'.repeat(9) + '…');
   });
 
@@ -1270,6 +1271,12 @@ describe('fork families', () => {
         .map(row => row.session.sessionId)
         .sort(),
       ['orphan-a', 'orphan-b'],
+    );
+    assert.deepEqual(
+      buildVisibleSessionRows(families, new Set(['deleted-parent']))
+        .filter(row => row.kind === 'session')
+        .map(row => [row.branchOrdinal, row.branchSiblingCount, row.isRoot]),
+      [[1, 2, false], [2, 2, false]],
     );
   });
 
