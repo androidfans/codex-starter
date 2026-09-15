@@ -65,7 +65,7 @@ Session summaries and completed search indexes are cached in `~/.codex/codex-sta
 - Dangerous mode with `d`, remembered for the next launch
 - Explicit launch mode selector with `m`, persisted locally
 - Project filter with `p`
-- Fork families collapsed into one row, with Finder-style expansion
+- Fork families with flat linear runs, labeled branch reasons, and nested chain folding
 - Full conversation history in an independently scrollable preview
 - Codex AI-generated conversation titles, with graceful fallback to the first prompt
 - Cached startup that only reparses new or changed rollouts

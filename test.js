@@ -21,6 +21,7 @@ const {
   loadCodexThreadNames,
   applyCodexThreadNames,
   getSessionDisplayTitle,
+  getForkReason,
   buildSessionSearchText,
   indexSessionsInBackground,
   updateSessionCacheRecord,
@@ -34,8 +35,12 @@ const {
   rowTargetsFamilyTitle,
   reconcileFamilyMetaAfterDelete,
   formatTimestamp,
+  formatFamilySpan,
   formatFileSize,
   esc,
+  truncateDisplayText,
+  getFamilyForkCount,
+  getVersionLabelText,
   loadMeta,
   saveMeta,
   getSessionMeta,
@@ -104,6 +109,16 @@ describe('helpers', () => {
     assert.equal(formatFileSize(2048), '2K');
     assert.equal(formatFileSize(1048576), '1.0M');
     assert.equal(formatTimestamp(null), 'unknown');
+  });
+
+  it('truncates long and wide titles by terminal display width', () => {
+    assert.equal(truncateDisplayText('你好世界', 5), '你好…');
+    assert.equal(truncateDisplayText('👨‍👩‍👧‍👦abc', 3), '👨‍👩‍👧‍👦…');
+    assert.equal(truncateDisplayText('a'.repeat(10000), 10), 'a'.repeat(9) + '…');
+    assert.equal(
+      getForkReason({ topic: 'a'.repeat(119) + '😀tail' }),
+      'a'.repeat(119) + '😀',
+    );
   });
 
   it('escapes literal braces with blessed-compatible tags', () => {
@@ -1070,6 +1085,29 @@ describe('fork families', () => {
     };
   }
 
+  function forkTreeFixture() {
+    const atHour = hour => new Date(Date.UTC(2026, 8, 10, hour)).toISOString();
+    const sessions = [session('demo-root', '', atHour(0))];
+    let parentId = 'demo-root';
+    for (let index = 1; index <= 18; index++) {
+      const id = `demo-trunk-${String(index).padStart(2, '0')}`;
+      sessions.push(session(id, parentId, atHour(index)));
+      parentId = id;
+    }
+
+    const activeReason = 'Flatten linear chains and indent only at real branches';
+    const active1 = session('demo-active-01', parentId, atHour(19));
+    const active2 = session('demo-active-02', active1.sessionId, atHour(20));
+    const active3 = session('demo-active-03', active2.sessionId, atHour(23));
+    active1.topic = activeReason;
+    active2.topic = activeReason;
+    active3.topic = activeReason;
+    const alternative1 = session('demo-alt-01', parentId, atHour(21));
+    const alternative2 = session('demo-alt-02', alternative1.sessionId, atHour(22));
+    sessions.push(active1, active2, active3, alternative1, alternative2);
+    return sessions;
+  }
+
   it('keeps singletons as ordinary session rows', () => {
     const only = session('only', '', '2026-04-13T01:00:00.000Z');
     const families = buildSessionFamilies([only]);
@@ -1150,6 +1188,57 @@ describe('fork families', () => {
     assert.equal(expanded.find(row => row.session.sessionId === 'grandchild').isDefault, true);
   });
 
+  it('keeps linear depth flat and indents only after a real branch', () => {
+    const demoSessions = forkTreeFixture();
+    const families = buildSessionFamilies(demoSessions);
+    const family = families[0];
+    const collapsed = buildVisibleSessionRows(families, new Set());
+    const compact = buildVisibleSessionRows(families, new Set([family.familyId]));
+    const trunkChain = compact.find(row => row.kind === 'chain');
+    const expanded = buildVisibleSessionRows(
+      families,
+      new Set([family.familyId]),
+      new Set([trunkChain.chainId]),
+    );
+    const sessionRows = expanded.filter(row => row.kind === 'session');
+    const trunkRows = sessionRows.filter(row => (
+      row.session.sessionId === 'demo-root' || row.session.sessionId.startsWith('demo-trunk-')
+    ));
+    const branchRows = sessionRows.filter(row => (
+      row.session.sessionId.startsWith('demo-active-') || row.session.sessionId.startsWith('demo-alt-')
+    ));
+
+    assert.equal(demoSessions.length, 24, 'one original plus 23 forks');
+    assert.deepEqual(collapsed.map(row => row.kind), ['family']);
+    assert.equal(trunkChain.chainCount, 19);
+    assert.equal(trunkChain.branchCount, 2);
+    assert.equal(compact.filter(row => row.kind === 'session').length, 5,
+      'the long trunk folds while short branches remain immediately readable');
+    assert.equal(sessionRows.length, 24);
+    assert.equal(new Set(trunkRows.map(row => row.treePrefix.length)).size, 1,
+      'all 19 nodes in the linear trunk consume the same horizontal width');
+    assert.deepEqual(new Set(trunkRows.map(row => row.branchDepth)), new Set([1]));
+    assert.deepEqual(new Set(branchRows.map(row => row.branchDepth)), new Set([2]));
+    assert.equal(sessionRows.find(row => row.session.sessionId === 'demo-trunk-18').branchCount, 2);
+    assert.deepEqual(
+      ['demo-active-01', 'demo-alt-01'].map(sessionId => {
+        const row = sessionRows.find(candidate => candidate.session.sessionId === sessionId);
+        return [row.branchOrdinal, row.branchSiblingCount];
+      }),
+      [[1, 2], [2, 2]],
+      'each immediate child branch gets an unambiguous ordinal',
+    );
+    assert.ok(
+      sessionRows.find(row => row.session.sessionId === 'demo-alt-02').treePrefix.endsWith('│ '),
+      'a flattened continuation uses a rail, never a sibling-like corner',
+    );
+    assert.equal(sessionRows.find(row => row.session.sessionId === 'demo-active-03').isDefault, true);
+    assert.equal(
+      getForkReason(demoSessions.find(session => session.sessionId === 'demo-active-01')),
+      'Flatten linear chains and indent only at real branches',
+    );
+  });
+
   it('starts an orphaned fork as its own family and honors later parent activity', () => {
     const orphan = session('orphan', 'missing', '2026-04-13T02:00:00.000Z');
     const root = session('root-later', '', '2026-04-13T05:00:00.000Z');
@@ -1159,23 +1248,39 @@ describe('fork families', () => {
 
     assert.equal(families.length, 2);
     assert.equal(parentFamily.defaultSession.sessionId, 'root-later');
+    const rootRow = buildVisibleSessionRows(
+      [parentFamily],
+      new Set([parentFamily.familyId]),
+    ).find(row => row.kind === 'session' && row.session.sessionId === 'root-later');
+    assert.equal(getVersionLabelText(rootRow), '◇ Original ● Latest');
   });
 
   it('keeps sibling forks grouped when their common parent is missing', () => {
     const branchA = session('orphan-a', 'deleted-parent', '2026-04-13T02:00:00.000Z');
-    const branchB = session('orphan-b', 'deleted-parent', '2026-04-13T03:00:00.000Z');
+    const branchB = session('orphan-b', 'deleted-parent', '2026-04-14T03:00:00.000Z');
     const families = buildSessionFamilies([branchB, branchA]);
 
     assert.equal(families.length, 1);
     assert.equal(families[0].familyId, 'deleted-parent');
     assert.equal(families[0].hasForks, true);
     assert.equal(families[0].defaultSession.sessionId, 'orphan-b');
+    assert.equal(getFamilyForkCount(families[0]), 2);
+    assert.equal(
+      formatFamilySpan(families[0]),
+      `${formatTimestamp(branchA.firstTs)} → ${formatTimestamp(branchB.firstTs)}`,
+    );
     assert.deepEqual(
       buildVisibleSessionRows(families, new Set(['deleted-parent']))
         .filter(row => row.kind === 'session')
         .map(row => row.session.sessionId)
         .sort(),
       ['orphan-a', 'orphan-b'],
+    );
+    assert.deepEqual(
+      buildVisibleSessionRows(families, new Set(['deleted-parent']))
+        .filter(row => row.kind === 'session')
+        .map(row => [row.branchOrdinal, row.branchSiblingCount, row.isRoot]),
+      [[1, 2, false], [2, 2, false]],
     );
   });
 

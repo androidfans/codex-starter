@@ -48,6 +48,7 @@
   ],
   "dependencies": {
     "blessed": "^0.1.81",
-    "blessed-contrib": "^4.11.0"
+    "blessed-contrib": "^4.11.0",
+    "string-width": "^4.2.3"
   }
 }
