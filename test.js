@@ -37,6 +37,8 @@ const {
   formatTimestamp,
   formatFileSize,
   esc,
+  getFamilyForkCount,
+  getVersionLabelText,
   loadMeta,
   saveMeta,
   getSessionMeta,
@@ -1234,6 +1236,11 @@ describe('fork families', () => {
 
     assert.equal(families.length, 2);
     assert.equal(parentFamily.defaultSession.sessionId, 'root-later');
+    const rootRow = buildVisibleSessionRows(
+      [parentFamily],
+      new Set([parentFamily.familyId]),
+    ).find(row => row.kind === 'session' && row.session.sessionId === 'root-later');
+    assert.equal(getVersionLabelText(rootRow), '◇ Original ● Latest');
   });
 
   it('keeps sibling forks grouped when their common parent is missing', () => {
@@ -1245,6 +1252,7 @@ describe('fork families', () => {
     assert.equal(families[0].familyId, 'deleted-parent');
     assert.equal(families[0].hasForks, true);
     assert.equal(families[0].defaultSession.sessionId, 'orphan-b');
+    assert.equal(getFamilyForkCount(families[0]), 2);
     assert.deepEqual(
       buildVisibleSessionRows(families, new Set(['deleted-parent']))
         .filter(row => row.kind === 'session')

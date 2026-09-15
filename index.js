@@ -1486,6 +1486,18 @@ function formatBranchOrdinal(ordinal) {
   return circled[ordinal] || `[${ordinal}]`;
 }
 
+function getFamilyForkCount(family) {
+  const hasSurvivingOriginal = family.memberById.has(family.familyId);
+  return Math.max(1, family.members.length - (hasSurvivingOriginal ? 1 : 0));
+}
+
+function getVersionLabelText(row) {
+  const labels = [];
+  if (row.isRoot) labels.push('◇ Original');
+  if (row.isDefault) labels.push('● Latest');
+  return labels.length > 0 ? labels.join(' ') : '○';
+}
+
 function copyToClipboard(text) {
   const commands = [
     ['pbcopy', []],
@@ -1768,7 +1780,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const familyTitle = getFamilyTitleForRow(meta, row);
 
       if (row.kind === 'family') {
-        const forkCount = Math.max(1, row.family.members.length - 1);
+        const forkCount = getFamilyForkCount(row.family);
         const span = formatFamilySpan(row.family);
         const summary = `Fork × ${forkCount}`;
         const rawTopic = familyTitle || getSessionDisplayTitle(session);
@@ -1833,10 +1845,12 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         const branchLabel = branchLabelText
           ? `{#5ad1e6-fg}{bold}${branchLabelText}{/}`
           : '';
-        const versionText = row.isRoot ? '◇ Original' : (row.isDefault ? '● Latest' : '○');
-        const version = row.isRoot
-          ? `{#8a8178-fg}${versionText}{/}`
-          : (row.isDefault ? `{#a3e635-fg}${versionText}{/}` : `{#8a8178-fg}${versionText}{/}`);
+        const versionText = getVersionLabelText(row);
+        const version = row.isRoot && row.isDefault
+          ? '{#8a8178-fg}◇ Original{/} {#a3e635-fg}● Latest{/}'
+          : (row.isDefault
+            ? `{#a3e635-fg}${versionText}{/}`
+            : `{#8a8178-fg}${versionText}{/}`);
         const branchHintText = row.branchCount > 1 ? ` fork×${row.branchCount}` : '';
         const branchHint = branchHintText ? `{#ffd166-fg}${branchHintText}{/}` : '';
         const parentId = row.family.parentById.get(session.sessionId);
@@ -3001,6 +3015,8 @@ if (typeof module !== 'undefined') {
     formatFileSize,
     getProjectColor,
     esc,
+    getFamilyForkCount,
+    getVersionLabelText,
     // Meta
     loadMeta,
     saveMeta,
