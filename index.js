@@ -181,6 +181,12 @@ function getSessionDisplayTitle(session) {
   return session.customTitle || session.aiTitle || session.topic || '';
 }
 
+function getForkReason(session) {
+  if (!session) return '';
+  const topic = session.topic && session.topic !== PENDING_TOPIC ? session.topic : '';
+  return trimTopic(session.customTitle || topic || session.aiTitle || '', 120);
+}
+
 // ─── Session Meta ────────────────────────────────────────────────────
 // Stores user-defined metadata for sessions in a simple JSON file.
 
@@ -1229,7 +1235,9 @@ function buildSessionFamilies(sessions) {
       familyId,
       root,
       members,
+      memberById: new Map(members.map(member => [member.sessionId, member])),
       childrenById,
+      parentById,
       defaultSession,
       lastTs: defaultSession.lastTs || defaultSession.firstTs,
       hasForks: members.length > 1,
@@ -1245,7 +1253,11 @@ function buildSessionFamilies(sessions) {
   return families;
 }
 
-function buildVisibleSessionRows(families, expandedFamilyIds = new Set()) {
+function buildVisibleSessionRows(
+  families,
+  expandedFamilyIds = new Set(),
+  expandedChainIds = new Set(),
+) {
   const rows = [];
   for (const family of families) {
     if (!family.hasForks) {
@@ -1275,32 +1287,129 @@ function buildVisibleSessionRows(families, expandedFamilyIds = new Set()) {
     if (!isExpanded) continue;
 
     const visited = new Set();
-    function appendMember(member, ancestorHasNext = [], isLast = true) {
-      if (!member || visited.has(member.sessionId)) return;
-      visited.add(member.sessionId);
-      const treePrefix = ancestorHasNext.map(hasNext => (hasNext ? '│  ' : '   ')).join('')
-        + (isLast ? '└─ ' : '├─ ');
-      rows.push({
-        kind: 'session',
-        key: `session:${member.sessionId}`,
-        family,
-        session: member,
-        depth: ancestorHasNext.length + 1,
-        treePrefix,
-        isDefault: member === family.defaultSession,
-        isRoot: member === family.root,
-      });
-      const children = family.childrenById.get(member.sessionId) || [];
-      children.forEach((child, index) => {
-        appendMember(child, [...ancestorHasNext, !isLast], index === children.length - 1);
+    const MAX_BRANCH_INDENT = 8;
+
+    // Render a maximal one-child run as one visual segment. Every member in
+    // the segment gets the same-width prefix; indentation is added only when
+    // the endpoint actually splits into multiple children.
+    function appendLinearSegment(
+      start,
+      branchGuides = [false],
+      actualDepth = 0,
+      isRootSegment = false,
+      branchOrdinal = 0,
+      branchSiblingCount = 1,
+    ) {
+      if (!start || visited.has(start.sessionId)) return;
+
+      const segment = [];
+      let member = start;
+      let memberDepth = actualDepth;
+      while (member && !visited.has(member.sessionId)) {
+        visited.add(member.sessionId);
+        segment.push({ member, actualDepth: memberDepth });
+        const children = family.childrenById.get(member.sessionId) || [];
+        if (children.length !== 1 || visited.has(children[0].sessionId)) break;
+        member = children[0];
+        memberDepth++;
+      }
+
+      const visibleGuides = branchGuides.slice(-MAX_BRANCH_INDENT);
+      const hiddenBranchLevels = Math.max(0, branchGuides.length - visibleGuides.length);
+      const guideBase = visibleGuides.slice(0, -1)
+        .map(hasNext => (hasNext ? '│ ' : '  '))
+        .join('');
+      const hasNextSegment = visibleGuides.at(-1) || false;
+
+      const endpoint = segment.at(-1)?.member;
+      const endpointChildren = endpoint ? (family.childrenById.get(endpoint.sessionId) || []) : [];
+      const chainId = `${family.familyId}:${segment[0].member.sessionId}:${endpoint.sessionId}`;
+      const isCollapsibleChain = segment.length >= 4;
+      const isChainExpanded = expandedChainIds.has(chainId);
+
+      if (isCollapsibleChain && !isChainExpanded) {
+        let connector;
+        if (isRootSegment) {
+          connector = endpointChildren.length > 0 ? '│ ' : '└─';
+        } else {
+          connector = hasNextSegment || endpointChildren.length > 0 ? '├─' : '└─';
+        }
+        const depthBadge = hiddenBranchLevels > 0 ? `[b${branchGuides.length}] ` : '';
+        rows.push({
+          kind: 'chain',
+          key: `chain:${chainId}`,
+          chainId,
+          family,
+          session: segment.find(item => item.member === family.defaultSession)?.member || endpoint,
+          firstSession: segment[0].member,
+          lastSession: endpoint,
+          chainCount: segment.length,
+          depth: branchGuides.length,
+          actualDepth,
+          branchDepth: branchGuides.length,
+          treePrefix: depthBadge + guideBase + connector,
+          branchCount: endpointChildren.length,
+          branchOrdinal,
+          branchSiblingCount,
+          isExpanded: false,
+          isDefault: segment.some(item => item.member === family.defaultSession),
+          isRoot: isRootSegment,
+        });
+      } else {
+
+        segment.forEach(({ member: segmentMember, actualDepth: rowDepth }, index) => {
+          const children = family.childrenById.get(segmentMember.sessionId) || [];
+          const isFirst = index === 0;
+          const isLast = index === segment.length - 1;
+          let connector = '│ ';
+          if (isRootSegment) {
+            connector = isLast && children.length === 0 ? '└─' : '│ ';
+          } else if (isFirst) {
+            // A multi-row branch must keep its vertical rail open after the
+            // first row. The ordinal, rather than an early └, marks which
+            // direct branch this is.
+            connector = hasNextSegment || segment.length > 1 ? '├─' : '└─';
+          }
+          const depthBadge = hiddenBranchLevels > 0 ? `[b${branchGuides.length}] ` : '';
+          rows.push({
+            kind: 'session',
+            key: `session:${segmentMember.sessionId}`,
+            chainId,
+            chainCollapsible: isCollapsibleChain,
+            family,
+            session: segmentMember,
+            depth: branchGuides.length,
+            actualDepth: rowDepth,
+            branchDepth: branchGuides.length,
+            treePrefix: depthBadge + guideBase + connector,
+            linearSegmentLength: segment.length,
+            linearSegmentIndex: index,
+            branchCount: children.length,
+            branchOrdinal: isFirst ? branchOrdinal : 0,
+            branchSiblingCount,
+            isDefault: segmentMember === family.defaultSession,
+            isRoot: segmentMember === family.root,
+          });
+        });
+      }
+
+      endpointChildren.forEach((child, index) => {
+        appendLinearSegment(
+          child,
+          [...branchGuides, index < endpointChildren.length - 1],
+          (segment.at(-1)?.actualDepth || actualDepth) + 1,
+          false,
+          index + 1,
+          endpointChildren.length,
+        );
       });
     }
 
-    appendMember(family.root, [], true);
+    appendLinearSegment(family.root, [false], 0, true);
     // Broken or cyclic input should remain accessible even if it cannot be
     // reached from the selected root.
     for (const member of family.members) {
-      if (!visited.has(member.sessionId)) appendMember(member, [], true);
+      if (!visited.has(member.sessionId)) appendLinearSegment(member, [false], 0, true);
     }
   }
   return rows;
@@ -1323,6 +1432,23 @@ function formatTimestamp(ts) {
   return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
+function formatDay(ts) {
+  if (!ts) return 'unknown';
+  return formatTimestamp(ts).replace(/\s\d{2}:\d{2}$/, '');
+}
+
+function formatFamilySpan(family) {
+  const chronological = family.members
+    .filter(member => member !== family.root)
+    .map(member => member.firstTs || member.lastTs)
+    .filter(Boolean)
+    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
+  if (chronological.length === 0) return '';
+  const start = formatDay(chronological[0]);
+  const end = formatDay(chronological.at(-1));
+  return start === end ? start : `${start} → ${end}`;
+}
+
 function formatFileSize(bytes) {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1048576) return `${(bytes / 1024).toFixed(0)}K`;
@@ -1340,6 +1466,19 @@ function esc(text) {
   // blessed does not treat a backslash before "{" as an escape. Use its
   // literal-brace tags so user/session text can never be parsed as styling.
   return String(text).replace(/[{}]/g, char => char === '{' ? '{open}' : '{close}');
+}
+
+function truncateDisplayText(text, maxLength) {
+  const characters = Array.from(String(text || ''));
+  if (maxLength <= 0) return '';
+  if (characters.length <= maxLength) return characters.join('');
+  if (maxLength === 1) return '…';
+  return characters.slice(0, maxLength - 1).join('') + '…';
+}
+
+function formatBranchOrdinal(ordinal) {
+  const circled = ['', '①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨'];
+  return circled[ordinal] || `[${ordinal}]`;
 }
 
 function copyToClipboard(text) {
@@ -1383,9 +1522,74 @@ async function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
-  const allSessions = loadAllSessions();
-  const meta = loadMeta();
+function createForkTreeDemoSessions(now = Date.now()) {
+  const sessions = [];
+  const project = 'codex-starter-demo';
+  const cwd = path.join(process.cwd(), 'demo-workspace');
+  const mainTitle = 'Redesign deeply nested Fork history';
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const timestamp = (daysAgo, minuteOffset = 0) => new Date(
+    today.getTime() - (daysAgo * 86400000) + (minuteOffset * 60000),
+  ).toISOString();
+
+  function add(sessionId, forkedFromId, firstTs, topic = mainTitle, isLatest = false) {
+    sessions.push({
+      sessionId,
+      forkedFromId,
+      ancestorIds: [],
+      firstTs,
+      lastTs: isLatest ? timestamp(1, 15 * 60) : firstTs,
+      topic,
+      aiTitle: topic,
+      customTitle: '',
+      project,
+      cwd,
+      source: 'cli',
+      originator: 'codex-tui',
+      gitBranch: 'demo/compact-fork-tree',
+      version: 'demo',
+      modelProvider: 'openai',
+      fileSize: 18000,
+      duration: '12m',
+      estimatedMessages: 8,
+      totalMessages: 8,
+      userMessages: ['Show the Fork history without wasting horizontal space.'],
+      assistantSnippets: ['Linear chains stay flat; indentation now represents real branch points only.'],
+      toolsUsed: [],
+      searchText: `${topic} Fork history linear chain`,
+      _detailLoaded: true,
+      _searchIndexed: true,
+    });
+  }
+
+  add('demo-root', '', timestamp(5));
+  let parentId = 'demo-root';
+  for (let index = 1; index <= 18; index++) {
+    const id = `demo-trunk-${String(index).padStart(2, '0')}`;
+    const daysAgo = 5 - Math.min(3, Math.floor(index / 5));
+    add(id, parentId, timestamp(daysAgo, index * 31));
+    parentId = id;
+  }
+
+  const activeReason = 'Flatten linear chains and indent only at real branches';
+  add('demo-active-01', parentId, timestamp(2, 17 * 60), activeReason);
+  add('demo-active-02', 'demo-active-01', timestamp(1, 10 * 60), activeReason);
+  add('demo-active-03', 'demo-active-02', timestamp(1, 15 * 60), activeReason, true);
+  add('demo-alt-01', parentId, timestamp(2, 18 * 60), 'Alternative: keep the classic nested tree');
+  add('demo-alt-02', 'demo-alt-01', timestamp(2, 20 * 60), 'Alternative: keep the classic nested tree');
+
+  return sessions;
+}
+
+function createApp({
+  activateInputSource = createInputSourceActivator(),
+  sessions: providedSessions,
+  providedMeta,
+  demoMode = false,
+} = {}) {
+  const allSessions = providedSessions || loadAllSessions();
+  const meta = providedMeta || (demoMode ? { sessions: {} } : loadMeta());
 
   // Apply meta customTitles — these take priority over JSONL titles
   // so renames persist even after continuing a conversation
@@ -1397,9 +1601,10 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   }
 
   const expandedFamilyIds = new Set();
+  const expandedChainIds = new Set();
   let allFamilies = buildSessionFamilies(allSessions);
   let filteredFamilies = [...allFamilies];
-  let displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+  let displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
   let selectedIndex = -1;  // -1 = "New Session", 0+ = display row index
   let filterText = '';
   let projectFilter = '';
@@ -1457,7 +1662,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   });
 
   function updateHeader() {
-    const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`;
+    const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`
+      + (demoMode ? ' {#ffd166-fg}[CHAIN DEMO]{/}' : '');
     const count = `{#a3e635-fg}${filteredFamilies.length}{/}{#8a8178-fg}/${allFamilies.length} conversations · ${allSessions.length} versions{/}`;
     const proj = `{#ffd166-fg}${uniqueProjects.length}{/}{#8a8178-fg} projects{/}`;
     const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
@@ -1566,6 +1772,13 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       '{#ff5d73-fg}{bold}x{/} {#ff5d73-fg}Delete{/}',
       '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}',
     ];
+    if (demoMode) {
+      keys.splice(0, keys.length,
+        '{#ff7a1a-fg}{bold}↑↓{/} {#ff7a1a-fg}Navigate{/}',
+        '{#ffd166-fg}{bold}←→ / h l{/} {#ffd166-fg}Fold / unfold{/}',
+        '{#8a8178-fg}Linear depth stays flat · branches indent{/}',
+        '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}');
+    }
     footer.setContent(`\n ${keys.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
@@ -1619,46 +1832,94 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const color = getProjectColor(session.project, projectColorMap);
       const marker = row.kind === 'family'
         ? (row.isExpanded ? '▾ ' : '▸ ')
-        : (row.treePrefix || '  ');
-      const markerWidth = row.treePrefix ? row.treePrefix.length : 2;
-      const familyBadge = row.kind === 'family'
-        ? `{#ffd166-fg}[${row.family.members.length}] → Latest{/} {#a3e635-fg}●{/} `
-        : '';
-      const familyBadgeWidth = row.kind === 'family'
-        ? `[${row.family.members.length}] → Latest ● `.length
-        : 0;
-      const compactFamily = row.kind === 'family' && listW < 60;
-      const projectWidth = Math.max(7, 12 - Math.max(0, markerWidth - 2));
+        : (row.kind === 'chain' ? `${row.treePrefix || '  '}▸ ` : (row.treePrefix || '  '));
+      const familyTitle = getFamilyTitleForRow(meta, row);
+
+      if (row.kind === 'family') {
+        const forkCount = Math.max(1, row.family.members.length - 1);
+        const span = formatFamilySpan(row.family);
+        const summary = `Fork × ${forkCount}`;
+        const spanText = span ? ` (${span})` : '';
+        const compactFamily = listW < 60;
+        const projectWidth = compactFamily ? 0 : 14;
+        const proj = projectWidth
+          ? `  {${color}-fg}${esc(session.project.substring(0, projectWidth))}{/}`
+          : '';
+        const fixedLen = 2 + summary.length + spanText.length + projectWidth + (projectWidth ? 6 : 4);
+        const topicMaxLen = Math.max(0, listW - fixedLen);
+        let topic = familyTitle || getSessionDisplayTitle(session);
+        topic = truncateDisplayText(topic, topicMaxLen);
+        const titleStyle = familyTitle || session.customTitle || session.aiTitle
+          ? '#5bd1b9-fg}{bold'
+          : '#e7dccf-fg';
+        return `{#8a8178-fg}${marker}{/}`
+          + `{#ffd166-fg}{bold}${summary}{/}`
+          + `{#8a8178-fg}${esc(spanText)}{/}${proj}`
+          + (topic ? `  {${titleStyle}}${esc(topic)}{/}` : '')
+          + ' {#a3e635-fg}●{/}';
+      }
+
+      if (row.kind === 'chain') {
+        const start = formatDay(row.firstSession.firstTs || row.firstSession.lastTs);
+        const end = formatDay(row.lastSession.firstTs || row.lastSession.lastTs);
+        const span = start === end ? start : `${start} → ${end}`;
+        const branchLabel = row.branchSiblingCount > 1 && row.branchOrdinal
+          ? `{#5ad1e6-fg}{bold}${formatBranchOrdinal(row.branchOrdinal)}{/} `
+          : '';
+        const branchHint = row.branchCount > 1
+          ? ` {#ffd166-fg}fork×${row.branchCount}{/}`
+          : '';
+        const reason = row.branchOrdinal ? getForkReason(row.firstSession) : '';
+        const fixedWidth = marker.length + 10 + span.length + (branchHint ? 7 : 0)
+          + (branchLabel ? 2 : 0) + (row.isDefault ? 9 : 0);
+        const reasonText = truncateDisplayText(reason, Math.max(0, listW - fixedWidth));
+        return `{#8a8178-fg}${marker}{/}${branchLabel}`
+          + `{#ffd166-fg}{bold}Chain × ${row.chainCount}{/}`
+          + ` {#8a8178-fg}(${esc(span)}){/}`
+          + branchHint
+          + (row.isDefault ? ' {#a3e635-fg}● Latest{/}' : '')
+          + (reasonText ? `  {#e7dccf-fg}${esc(reasonText)}{/}` : '');
+      }
+
+      if (row.family.hasForks) {
+        const time = formatTimestamp(session.firstTs || session.lastTs);
+        const branchLabel = row.branchSiblingCount > 1 && row.branchOrdinal
+          ? `{#5ad1e6-fg}{bold}${formatBranchOrdinal(row.branchOrdinal)}{/} `
+          : '';
+        const version = row.isRoot
+          ? '{#8a8178-fg}◇ Original{/}'
+          : (row.isDefault ? '{#a3e635-fg}● Latest{/}' : '{#8a8178-fg}○{/}');
+        const branchHint = row.branchCount > 1
+          ? ` {#ffd166-fg}fork×${row.branchCount}{/}`
+          : '';
+        const parentId = row.family.parentById.get(session.sessionId);
+        const parentSession = row.family.memberById.get(parentId);
+        const versionTitle = getSessionDisplayTitle(session);
+        const parentTitle = parentSession ? getSessionDisplayTitle(parentSession) : '';
+        const contextText = row.isRoot
+          ? ''
+          : (row.branchOrdinal
+            ? getForkReason(session)
+            : (versionTitle && versionTitle !== parentTitle ? versionTitle : ''));
+        const contextMax = Math.max(
+          0,
+          listW - marker.length - time.length - 12 - (branchHint ? 7 : 0),
+        );
+        const context = contextText
+          ? `  {#e7dccf-fg}${esc(truncateDisplayText(contextText, contextMax))}{/}`
+          : '';
+        return `{#8a8178-fg}${marker}{/}`
+          + branchLabel
+          + `{#ffb347-fg}${esc(time.padEnd(18))}{/} ${version}`
+          + branchHint + context;
+      }
+
+      const projectWidth = 12;
       const proj = `{${color}-fg}${esc(session.project.substring(0, projectWidth).padEnd(projectWidth))}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
-
-      const metadataWidth = compactFamily ? 0 : projectWidth + 1 + 16 + 1;
-      const fixedLen = markerWidth + familyBadgeWidth + metadataWidth + 3;
-      const topicMaxLen = Math.max(0, listW - fixedLen);
-      const familyTitle = getFamilyTitleForRow(meta, row);
-      const hasCustomTitle = Boolean(familyTitle || session.customTitle || session.aiTitle);
-      let topic = familyTitle || getSessionDisplayTitle(session);
-
-      if (topic.length > topicMaxLen) {
-        topic = topicMaxLen > 1 ? topic.substring(0, topicMaxLen - 1) + '…' : '';
-      }
-
-      const versionLabel = row.kind === 'session' && row.family.hasForks
-        ? (row.isRoot ? '{#8a8178-fg}Original{/} ' : '{#8a8178-fg}Fork{/} ')
-        : '';
-      const latest = row.kind === 'session' && row.family.hasForks && row.isDefault
-        ? ' {#a3e635-fg}●{/}'
-        : '';
-      const metadata = compactFamily ? '' : `${proj} ${time} `;
-      let label = `{#8a8178-fg}${marker}{/}${familyBadge}${metadata}${versionLabel}`;
-      if (hasCustomTitle) {
-        label += `{#5bd1b9-fg}{bold}${esc(topic)}{/}`;
-      } else {
-        label += `{#e7dccf-fg}${esc(topic)}{/}`;
-      }
-      label += latest;
-
-      return label;
+      const topicMaxLen = Math.max(0, listW - projectWidth - 22);
+      const topic = truncateDisplayText(getSessionDisplayTitle(session), topicMaxLen);
+      return `{#8a8178-fg}${marker}{/}${proj} ${time} {#e7dccf-fg}${esc(topic)}{/}`;
     });
 
     const items = [NEW_SESSION_LABEL, ...sessionItems];
@@ -1798,6 +2059,29 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     }
 
     const selectedRow = displayRows[selectedIndex];
+    if (selectedRow.kind === 'chain') {
+      const color = getProjectColor(selectedRow.session.project, projectColorMap);
+      const sep = ` {#3a3f46-fg}${'─'.repeat(44)}{/}`;
+      const start = formatTimestamp(selectedRow.firstSession.firstTs || selectedRow.firstSession.lastTs);
+      const end = formatTimestamp(selectedRow.lastSession.firstTs || selectedRow.lastSession.lastTs);
+      const reason = selectedRow.branchOrdinal ? getForkReason(selectedRow.firstSession) : '';
+      const metaContent = ` {${color}-fg}{bold}│ Linear Fork Chain{/}\n${sep}`
+        + `\n\n {#8a8178-fg}Versions    {/} {#ffd166-fg}${selectedRow.chainCount}{/}`
+        + `\n {#8a8178-fg}From        {/} {#ffb347-fg}${esc(start)}{/}`
+        + `\n {#8a8178-fg}To          {/} {#ffb347-fg}${esc(end)}{/}`
+        + (selectedRow.branchCount > 1
+          ? `\n {#8a8178-fg}Ends at     {/} {#ffd166-fg}fork×${selectedRow.branchCount}{/}`
+          : '')
+        + (selectedRow.isDefault ? '\n {#8a8178-fg}Contains    {/} {#a3e635-fg}● Latest{/}' : '');
+      const messagesContent = reason
+        ? `\n {#5ad1e6-fg}{bold}Branch reason{/}\n {#e7dccf-fg}${esc(reason)}{/}`
+        : '\n {#8a8178-fg}No branching occurs inside this run, so its versions are folded into one row.{/}';
+      const actionContent = `${sep}`
+        + '\n {#a3e635-fg}{bold}→ / l / Enter{/}{#a3e635-fg} to expand this chain{/}'
+        + '\n {#8a8178-fg}Expanded versions remain vertically aligned.{/}';
+      setDetailContent(metaContent, messagesContent, actionContent, selectedRow.key);
+      return;
+    }
     const session = selectedRow.session;
     loadSessionDetail(session);
     const launchMode = getLaunchMode(launchModeId);
@@ -1915,7 +2199,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         sessionMatchesFilter(member, terms, projectFilter, familyTitle)
       ));
     });
-    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
     const preservedIndex = selectedRowKey
       ? displayRows.findIndex(row => row.key === selectedRowKey)
       : -1;
@@ -2013,8 +2297,14 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   function cycleLaunchMode() {
     const currentIndex = LAUNCH_MODES.findIndex(mode => mode.id === launchModeId);
     launchModeId = LAUNCH_MODES[(currentIndex + 1) % LAUNCH_MODES.length].id;
-    setDefaultLaunchMode(meta, launchModeId);
+    if (!demoMode) setDefaultLaunchMode(meta, launchModeId);
     renderAll();
+  }
+
+  function showDemoNotice() {
+    footer.setContent('\n  {#ffd166-fg}{bold}Demo data is read-only.{/} {#8a8178-fg}Use ←/→ or h/l to compare folded and expanded views.{/}');
+    screen.render();
+    setTimeout(() => { updateFooter(); screen.render(); }, 1800);
   }
 
   // ─── Project Picker ────────────────────────────────────────────────────
@@ -2108,22 +2398,38 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
     moveSelection(-1);
   });
-  function expandSelectedFamily() {
+  function expandSelectedNode() {
     if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
     const row = displayRows[selectedIndex];
-    if (!row || row.kind !== 'family' || row.isExpanded) return;
-    expandedFamilyIds.add(row.family.familyId);
-    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
-    selectedIndex = displayRows.findIndex(candidate => candidate.key === row.key);
+    if (!row) return;
+    let selectionKey;
+    if (row.kind === 'family' && !row.isExpanded) {
+      expandedFamilyIds.add(row.family.familyId);
+      selectionKey = row.key;
+    } else if (row.kind === 'chain') {
+      expandedChainIds.add(row.chainId);
+      selectionKey = `session:${row.firstSession.sessionId}`;
+    } else {
+      return;
+    }
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
+    selectedIndex = displayRows.findIndex(candidate => candidate.key === selectionKey);
     renderAll();
   }
-  function collapseSelectedFamily() {
+  function collapseSelectedNode() {
     if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
     const row = displayRows[selectedIndex];
     if (!row || !row.family.hasForks || !expandedFamilyIds.has(row.family.familyId)) return;
+    if (row.kind === 'session' && row.chainCollapsible && expandedChainIds.has(row.chainId)) {
+      expandedChainIds.delete(row.chainId);
+      displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
+      selectedIndex = displayRows.findIndex(candidate => candidate.key === `chain:${row.chainId}`);
+      renderAll();
+      return;
+    }
     const familyKey = `family:${row.family.familyId}`;
     expandedFamilyIds.delete(row.family.familyId);
-    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds);
+    displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
     selectedIndex = displayRows.findIndex(candidate => candidate.key === familyKey);
     const visibleRows = Math.max(1, listPanel.height || 1);
     const selectedListIndex = selectedIndex + 1;
@@ -2136,8 +2442,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
     renderAll();
   }
-  screen.key(['right'], expandSelectedFamily);
-  screen.key(['left'], collapseSelectedFamily);
+  screen.key(['right'], expandSelectedNode);
+  screen.key(['left'], collapseSelectedNode);
   screen.key(['home'], () => {
     if (renameMode || popupOpen) return;
     if (isSearchMode) { isSearchMode = false; }
@@ -2249,8 +2555,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (!isSearchMode && !popupOpen) {
       if (ch === 'j') { moveSelection(1); return; }
       if (ch === 'k') { moveSelection(-1); return; }
-      if (ch === 'l') { expandSelectedFamily(); return; }
-      if (ch === 'h') { collapseSelectedFamily(); return; }
+      if (ch === 'l') { expandSelectedNode(); return; }
+      if (ch === 'h') { collapseSelectedNode(); return; }
       if (ch === 'G') {
         selectedIndex = displayRows.length > 0 ? displayRows.length - 1 : -1;
         suppressSelectEvent = true; listPanel.select(selectedIndex + 1); suppressSelectEvent = false;
@@ -2282,6 +2588,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   // ─── Resume Session ─────────────────────────────────────────────────────
 
   function resumeSession(session, overrideModeId = null) {
+    if (demoMode) { showDemoNotice(); return; }
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
@@ -2309,6 +2616,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   }
 
   function startNewSession(overrideModeId = null) {
+    if (demoMode) { showDemoNotice(); return; }
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
@@ -2360,6 +2668,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (popupOpen) return;
     if (selectedIndex === -1) { startNewSession(); return; }
     if (displayRows.length === 0 || selectedIndex < 0) return;
+    if (displayRows[selectedIndex].kind === 'chain') { expandSelectedNode(); return; }
     resumeSession(displayRows[selectedIndex].session);
   });
 
@@ -2391,6 +2700,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     if (renameMode || isSearchMode || popupOpen) return;
     if (selectedIndex === -1) { startNewSession('danger'); return; }
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    if (displayRows[selectedIndex].kind === 'chain') { expandSelectedNode(); return; }
     resumeSession(displayRows[selectedIndex].session, 'danger');
   });
 
@@ -2460,10 +2770,11 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
   screen.key(['x', 'delete'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
+    if (demoMode) { showDemoNotice(); return; }
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
     const row = displayRows[selectedIndex];
-    if (row.kind === 'family') {
-      footer.setContent('\n  {#ffd166-fg}{bold}Expand this conversation first{/}{#8a8178-fg} to choose a version to delete{/}');
+    if (row.kind === 'family' || row.kind === 'chain') {
+      footer.setContent(`\n  {#ffd166-fg}{bold}Expand this ${row.kind === 'chain' ? 'chain' : 'conversation'} first{/}{#8a8178-fg} to choose a version to delete{/}`);
       screen.render();
       setTimeout(() => { updateFooter(); screen.render(); }, 1800);
       return;
@@ -2608,7 +2919,9 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
   screen.key([','], () => {
     if (isSearchMode || popupOpen) return;
+    if (demoMode) { showDemoNotice(); return; }
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
+    if (displayRows[selectedIndex].kind === 'chain') { expandSelectedNode(); return; }
     showRenameInput(displayRows[selectedIndex]);
   });
 
@@ -2721,6 +3034,7 @@ if (typeof module !== 'undefined') {
     loadCodexThreadNames,
     applyCodexThreadNames,
     getSessionDisplayTitle,
+    getForkReason,
     buildSessionSearchText,
     indexSessionsInBackground,
     updateSessionCacheRecord,
@@ -2730,6 +3044,7 @@ if (typeof module !== 'undefined') {
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,
+    createForkTreeDemoSessions,
     getFamilyTitleForRow,
     rowTargetsFamilyTitle,
     reconcileFamilyMetaAfterDelete,
@@ -2824,6 +3139,7 @@ if (require.main === module) {
 
 Usage:
   codex-starter              Launch interactive TUI
+  codex-starter --demo       Preview compact Fork-chain rendering
   codex-starter --list [N]   Print latest N sessions (default: 30)
   codex-starter --version    Show version
   codex-starter --update     Update to the latest version
@@ -2860,6 +3176,13 @@ TUI Keyboard Shortcuts:
         process.exit(1);
       },
     );
+  } else if (args.includes('--demo')) {
+    createApp({
+      activateInputSource: () => {},
+      sessions: createForkTreeDemoSessions(),
+      providedMeta: { sessions: {} },
+      demoMode: true,
+    });
   } else {
     const activateInputSource = createInputSourceActivator();
     activateInputSource();

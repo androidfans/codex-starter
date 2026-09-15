@@ -400,7 +400,7 @@ describe('codex starter tui', () => {
     assert.match(plainHeader, /1 projects/);
     assert.ok(widgets.list.items.some(item => item.includes('build proj')));
     assert.ok(widgets.list.items.some(item => item.includes('▸')));
-    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
+    assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')));
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
     assert.ok(!widgets.list.items.some(item => item.includes('project-empty')));
   });
@@ -422,7 +422,8 @@ describe('codex starter tui', () => {
     triggerScreenKey('right');
     assert.equal(widgets.list.items.length, 5, 'family row plus all three versions');
     assert.ok(widgets.list.items.some(item => item.includes('Original')));
-    assert.equal(widgets.list.items.filter(item => item.includes('Fork')).length, 2);
+    assert.equal(widgets.list.items.filter(item => item.includes('○')).length, 1);
+    assert.ok(widgets.list.items.some(item => item.includes('● Latest')));
 
     triggerScreenKey('down');
     widgets.list.childBase = 3;
@@ -612,7 +613,7 @@ describe('codex starter tui', () => {
     triggerKeypress('e');
     triggerKeypress('r');
     assert.ok(widgets.header.getContent().includes('/ filter'));
-    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
+    assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')));
   });
 
   it('reactivates ABC after confirming or cancelling search input', () => {
@@ -632,12 +633,12 @@ describe('codex starter tui', () => {
     triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'release-summary-marker') triggerKeypress(ch);
-    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
+    assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')));
 
     triggerKeypress(null, 'escape');
     triggerScreenKey('/');
     for (const ch of 'tool-only-marker') triggerKeypress(ch);
-    assert.ok(!widgets.list.items.some(item => item.includes('→ Latest')));
+    assert.ok(!widgets.list.items.some(item => item.includes('Fork × 2')));
     triggerScreenKey('end');
     assert.equal(widgets.list._selectedIndex, 0);
     triggerKeypress('G');
@@ -648,7 +649,7 @@ describe('codex starter tui', () => {
   it('searches locally renamed session titles', () => {
     triggerScreenKey('/');
     for (const ch of 'renamed-dashboard-marker') triggerKeypress(ch);
-    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')));
+    assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')));
     triggerKeypress(null, 'escape');
   });
 
@@ -680,7 +681,7 @@ describe('codex starter tui', () => {
 
     triggerScreenKey('/');
     for (const ch of 'family-marker release-summary-marker') triggerKeypress(ch);
-    assert.ok(widgets.list.items.some(item => item.includes('→ Latest')),
+    assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')),
       'family titles combine with member transcript text during search');
     triggerKeypress(null, 'enter');
     triggerScreenKey('enter');
@@ -689,7 +690,7 @@ describe('codex starter tui', () => {
     for (let i = 0; i < 20; i++) triggerKeypress(null, 'backspace');
     for (const ch of 'renamed-conversation') triggerKeypress(ch);
     triggerKeypress(null, 'enter');
-    assert.ok(!widgets.list.items.some(item => item.includes('→ Latest')),
+    assert.ok(!widgets.list.items.some(item => item.includes('Fork × 2')),
       'renaming immediately reapplies a retained title filter');
     await new Promise(resolve => setTimeout(resolve, 220));
     triggerWidgetKey(widgets.renameConfirm, 'escape');

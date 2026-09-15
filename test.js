@@ -21,6 +21,7 @@ const {
   loadCodexThreadNames,
   applyCodexThreadNames,
   getSessionDisplayTitle,
+  getForkReason,
   buildSessionSearchText,
   indexSessionsInBackground,
   updateSessionCacheRecord,
@@ -30,6 +31,7 @@ const {
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
+  createForkTreeDemoSessions,
   getFamilyTitleForRow,
   rowTargetsFamilyTitle,
   reconcileFamilyMetaAfterDelete,
@@ -1148,6 +1150,57 @@ describe('fork families', () => {
       ],
     );
     assert.equal(expanded.find(row => row.session.sessionId === 'grandchild').isDefault, true);
+  });
+
+  it('keeps linear depth flat and indents only after a real branch', () => {
+    const demoSessions = createForkTreeDemoSessions(new Date('2026-09-15T12:00:00').getTime());
+    const families = buildSessionFamilies(demoSessions);
+    const family = families[0];
+    const collapsed = buildVisibleSessionRows(families, new Set());
+    const compact = buildVisibleSessionRows(families, new Set([family.familyId]));
+    const trunkChain = compact.find(row => row.kind === 'chain');
+    const expanded = buildVisibleSessionRows(
+      families,
+      new Set([family.familyId]),
+      new Set([trunkChain.chainId]),
+    );
+    const sessionRows = expanded.filter(row => row.kind === 'session');
+    const trunkRows = sessionRows.filter(row => (
+      row.session.sessionId === 'demo-root' || row.session.sessionId.startsWith('demo-trunk-')
+    ));
+    const branchRows = sessionRows.filter(row => (
+      row.session.sessionId.startsWith('demo-active-') || row.session.sessionId.startsWith('demo-alt-')
+    ));
+
+    assert.equal(demoSessions.length, 24, 'one original plus 23 forks');
+    assert.deepEqual(collapsed.map(row => row.kind), ['family']);
+    assert.equal(trunkChain.chainCount, 19);
+    assert.equal(trunkChain.branchCount, 2);
+    assert.equal(compact.filter(row => row.kind === 'session').length, 5,
+      'the long trunk folds while short branches remain immediately readable');
+    assert.equal(sessionRows.length, 24);
+    assert.equal(new Set(trunkRows.map(row => row.treePrefix.length)).size, 1,
+      'all 19 nodes in the linear trunk consume the same horizontal width');
+    assert.deepEqual(new Set(trunkRows.map(row => row.branchDepth)), new Set([1]));
+    assert.deepEqual(new Set(branchRows.map(row => row.branchDepth)), new Set([2]));
+    assert.equal(sessionRows.find(row => row.session.sessionId === 'demo-trunk-18').branchCount, 2);
+    assert.deepEqual(
+      ['demo-active-01', 'demo-alt-01'].map(sessionId => {
+        const row = sessionRows.find(candidate => candidate.session.sessionId === sessionId);
+        return [row.branchOrdinal, row.branchSiblingCount];
+      }),
+      [[1, 2], [2, 2]],
+      'each immediate child branch gets an unambiguous ordinal',
+    );
+    assert.ok(
+      sessionRows.find(row => row.session.sessionId === 'demo-alt-02').treePrefix.endsWith('│ '),
+      'a flattened continuation uses a rail, never a sibling-like corner',
+    );
+    assert.equal(sessionRows.find(row => row.session.sessionId === 'demo-active-03').isDefault, true);
+    assert.equal(
+      getForkReason(demoSessions.find(session => session.sessionId === 'demo-active-01')),
+      'Flatten linear chains and indent only at real branches',
+    );
   });
 
   it('starts an orphaned fork as its own family and honors later parent activity', () => {
