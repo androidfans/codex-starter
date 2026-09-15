@@ -14,6 +14,7 @@
  */
 
 const blessed = require('blessed');
+const stringWidth = require('string-width');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
@@ -1469,11 +1470,15 @@ function esc(text) {
 }
 
 function truncateDisplayText(text, maxLength) {
-  const characters = Array.from(String(text || ''));
+  const value = String(text || '');
   if (maxLength <= 0) return '';
-  if (characters.length <= maxLength) return characters.join('');
-  if (maxLength === 1) return '…';
-  return characters.slice(0, maxLength - 1).join('') + '…';
+  if (stringWidth(value) <= maxLength) return value;
+  if (maxLength < stringWidth('…')) return '';
+  const characters = Array.from(value);
+  while (characters.length > 0 && stringWidth(characters.join('') + '…') > maxLength) {
+    characters.pop();
+  }
+  return characters.join('') + '…';
 }
 
 function formatBranchOrdinal(ordinal) {
@@ -1766,16 +1771,20 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         const forkCount = Math.max(1, row.family.members.length - 1);
         const span = formatFamilySpan(row.family);
         const summary = `Fork × ${forkCount}`;
-        const spanText = span ? ` (${span})` : '';
-        const compactFamily = listW < 60;
-        const projectWidth = compactFamily ? 0 : 14;
-        const proj = projectWidth
-          ? `  {${color}-fg}${esc(session.project.substring(0, projectWidth))}{/}`
-          : '';
-        const fixedLen = 2 + summary.length + spanText.length + projectWidth + (projectWidth ? 6 : 4);
-        const topicMaxLen = Math.max(0, listW - fixedLen);
-        let topic = familyTitle || getSessionDisplayTitle(session);
-        topic = truncateDisplayText(topic, topicMaxLen);
+        const rawTopic = familyTitle || getSessionDisplayTitle(session);
+        const titlePrefix = rawTopic ? '  ' : '';
+        const latestText = ' ●';
+        let spanText = span ? ` (${span})` : '';
+        let projectText = listW >= 60 ? session.project.substring(0, 14) : '';
+        const fixedWidth = () => stringWidth(marker + summary + spanText + latestText + titlePrefix)
+          + (projectText ? stringWidth(`  ${projectText}`) : 0);
+        const reservedTitleWidth = Math.min(16, stringWidth(rawTopic));
+        // The title is the primary identifier; optional metadata degrades
+        // before the row is allowed to hide it on narrow terminals.
+        if (fixedWidth() + reservedTitleWidth > listW) projectText = '';
+        if (fixedWidth() + reservedTitleWidth > listW) spanText = '';
+        const topic = truncateDisplayText(rawTopic, Math.max(0, listW - fixedWidth()));
+        const proj = projectText ? `  {${color}-fg}${esc(projectText)}{/}` : '';
         const titleStyle = familyTitle || session.customTitle || session.aiTitle
           ? '#5bd1b9-fg}{bold'
           : '#e7dccf-fg';
@@ -1790,35 +1799,46 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
         const start = formatDay(row.firstSession.firstTs || row.firstSession.lastTs);
         const end = formatDay(row.lastSession.firstTs || row.lastSession.lastTs);
         const span = start === end ? start : `${start} → ${end}`;
-        const branchLabel = row.branchSiblingCount > 1 && row.branchOrdinal
-          ? `{#5ad1e6-fg}{bold}${formatBranchOrdinal(row.branchOrdinal)}{/} `
+        const branchLabelText = row.branchSiblingCount > 1 && row.branchOrdinal
+          ? `${formatBranchOrdinal(row.branchOrdinal)} `
           : '';
-        const branchHint = row.branchCount > 1
-          ? ` {#ffd166-fg}fork×${row.branchCount}{/}`
+        const branchLabel = branchLabelText
+          ? `{#5ad1e6-fg}{bold}${branchLabelText}{/}`
           : '';
+        const branchHintText = row.branchCount > 1 ? ` fork×${row.branchCount}` : '';
+        const branchHint = branchHintText ? `{#ffd166-fg}${branchHintText}{/}` : '';
+        const chainText = `Chain × ${row.chainCount}`;
+        const latestText = row.isDefault ? ' ● Latest' : '';
         const reason = row.branchOrdinal ? getForkReason(row.firstSession) : '';
-        const fixedWidth = marker.length + 10 + span.length + (branchHint ? 7 : 0)
-          + (branchLabel ? 2 : 0) + (row.isDefault ? 9 : 0);
-        const reasonText = truncateDisplayText(reason, Math.max(0, listW - fixedWidth));
+        const reasonPrefix = reason ? '  ' : '';
+        let spanText = ` (${span})`;
+        const fixedWidth = () => stringWidth(
+          marker + branchLabelText + chainText + spanText + branchHintText + latestText + reasonPrefix,
+        );
+        if (fixedWidth() + Math.min(16, stringWidth(reason)) > listW) spanText = '';
+        const reasonText = truncateDisplayText(reason, Math.max(0, listW - fixedWidth()));
         return `{#8a8178-fg}${marker}{/}${branchLabel}`
-          + `{#ffd166-fg}{bold}Chain × ${row.chainCount}{/}`
-          + ` {#8a8178-fg}(${esc(span)}){/}`
+          + `{#ffd166-fg}{bold}${chainText}{/}`
+          + (spanText ? `{#8a8178-fg}${esc(spanText)}{/}` : '')
           + branchHint
-          + (row.isDefault ? ' {#a3e635-fg}● Latest{/}' : '')
+          + (latestText ? `{#a3e635-fg}${latestText}{/}` : '')
           + (reasonText ? `  {#e7dccf-fg}${esc(reasonText)}{/}` : '');
       }
 
       if (row.family.hasForks) {
         const time = formatTimestamp(session.firstTs || session.lastTs);
-        const branchLabel = row.branchSiblingCount > 1 && row.branchOrdinal
-          ? `{#5ad1e6-fg}{bold}${formatBranchOrdinal(row.branchOrdinal)}{/} `
+        const branchLabelText = row.branchSiblingCount > 1 && row.branchOrdinal
+          ? `${formatBranchOrdinal(row.branchOrdinal)} `
           : '';
+        const branchLabel = branchLabelText
+          ? `{#5ad1e6-fg}{bold}${branchLabelText}{/}`
+          : '';
+        const versionText = row.isRoot ? '◇ Original' : (row.isDefault ? '● Latest' : '○');
         const version = row.isRoot
-          ? '{#8a8178-fg}◇ Original{/}'
-          : (row.isDefault ? '{#a3e635-fg}● Latest{/}' : '{#8a8178-fg}○{/}');
-        const branchHint = row.branchCount > 1
-          ? ` {#ffd166-fg}fork×${row.branchCount}{/}`
-          : '';
+          ? `{#8a8178-fg}${versionText}{/}`
+          : (row.isDefault ? `{#a3e635-fg}${versionText}{/}` : `{#8a8178-fg}${versionText}{/}`);
+        const branchHintText = row.branchCount > 1 ? ` fork×${row.branchCount}` : '';
+        const branchHint = branchHintText ? `{#ffd166-fg}${branchHintText}{/}` : '';
         const parentId = row.family.parentById.get(session.sessionId);
         const parentSession = row.family.memberById.get(parentId);
         const versionTitle = getSessionDisplayTitle(session);
@@ -1828,10 +1848,11 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
           : (row.branchOrdinal
             ? getForkReason(session)
             : (versionTitle && versionTitle !== parentTitle ? versionTitle : ''));
-        const contextMax = Math.max(
-          0,
-          listW - marker.length - time.length - 12 - (branchHint ? 7 : 0),
-        );
+        const contextPrefix = contextText ? '  ' : '';
+        const metadataWidth = stringWidth(marker + branchLabelText)
+          + Math.max(18, stringWidth(time)) + 1
+          + stringWidth(versionText + branchHintText + contextPrefix);
+        const contextMax = Math.max(0, listW - metadataWidth);
         const context = contextText
           ? `  {#e7dccf-fg}${esc(truncateDisplayText(contextText, contextMax))}{/}`
           : '';
@@ -1845,8 +1866,9 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       const proj = `{${color}-fg}${esc(session.project.substring(0, projectWidth).padEnd(projectWidth))}{/}`;
       const time = `{#ffb347-fg}${formatTimestamp(session.lastTs).padEnd(16)}{/}`;
       const topicMaxLen = Math.max(0, listW - projectWidth - 22);
-      const topic = truncateDisplayText(getSessionDisplayTitle(session), topicMaxLen);
-      return `{#8a8178-fg}${marker}{/}${proj} ${time} {#e7dccf-fg}${esc(topic)}{/}`;
+      const topic = truncateDisplayText(familyTitle || getSessionDisplayTitle(session), topicMaxLen);
+      const topicStyle = familyTitle ? '#5bd1b9-fg}{bold' : '#e7dccf-fg';
+      return `{#8a8178-fg}${marker}{/}${proj} ${time} {${topicStyle}}${esc(topic)}{/}`;
     });
 
     const items = [NEW_SESSION_LABEL, ...sessionItems];
@@ -2712,7 +2734,6 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   });
 
   // ─── Rename Session ───────────────────────────────────────────────────
-  const stringWidth = require('string-width');
   let renameMode = false;
   let renameJustFinished = false;
   let renameValue = '';
