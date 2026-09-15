@@ -35,8 +35,10 @@ const {
   rowTargetsFamilyTitle,
   reconcileFamilyMetaAfterDelete,
   formatTimestamp,
+  formatFamilySpan,
   formatFileSize,
   esc,
+  truncateDisplayText,
   getFamilyForkCount,
   getVersionLabelText,
   loadMeta,
@@ -107,6 +109,11 @@ describe('helpers', () => {
     assert.equal(formatFileSize(2048), '2K');
     assert.equal(formatFileSize(1048576), '1.0M');
     assert.equal(formatTimestamp(null), 'unknown');
+  });
+
+  it('truncates long and wide titles by terminal display width', () => {
+    assert.equal(truncateDisplayText('你好世界', 5), '你好…');
+    assert.equal(truncateDisplayText('a'.repeat(10000), 10), 'a'.repeat(9) + '…');
   });
 
   it('escapes literal braces with blessed-compatible tags', () => {
@@ -1245,7 +1252,7 @@ describe('fork families', () => {
 
   it('keeps sibling forks grouped when their common parent is missing', () => {
     const branchA = session('orphan-a', 'deleted-parent', '2026-04-13T02:00:00.000Z');
-    const branchB = session('orphan-b', 'deleted-parent', '2026-04-13T03:00:00.000Z');
+    const branchB = session('orphan-b', 'deleted-parent', '2026-04-14T03:00:00.000Z');
     const families = buildSessionFamilies([branchB, branchA]);
 
     assert.equal(families.length, 1);
@@ -1253,6 +1260,10 @@ describe('fork families', () => {
     assert.equal(families[0].hasForks, true);
     assert.equal(families[0].defaultSession.sessionId, 'orphan-b');
     assert.equal(getFamilyForkCount(families[0]), 2);
+    assert.equal(
+      formatFamilySpan(families[0]),
+      `${formatTimestamp(branchA.firstTs)} → ${formatTimestamp(branchB.firstTs)}`,
+    );
     assert.deepEqual(
       buildVisibleSessionRows(families, new Set(['deleted-parent']))
         .filter(row => row.kind === 'session')

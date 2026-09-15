@@ -1439,8 +1439,9 @@ function formatDay(ts) {
 }
 
 function formatFamilySpan(family) {
+  const hasSurvivingOriginal = family.memberById.has(family.familyId);
   const chronological = family.members
-    .filter(member => member !== family.root)
+    .filter(member => !hasSurvivingOriginal || member !== family.root)
     .map(member => member.firstTs || member.lastTs)
     .filter(Boolean)
     .sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
@@ -1475,10 +1476,15 @@ function truncateDisplayText(text, maxLength) {
   if (stringWidth(value) <= maxLength) return value;
   if (maxLength < stringWidth('…')) return '';
   const characters = Array.from(value);
-  while (characters.length > 0 && stringWidth(characters.join('') + '…') > maxLength) {
-    characters.pop();
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    const candidate = characters.slice(0, middle).join('') + '…';
+    if (stringWidth(candidate) <= maxLength) low = middle;
+    else high = middle - 1;
   }
-  return characters.join('') + '…';
+  return characters.slice(0, low).join('') + '…';
 }
 
 function formatBranchOrdinal(ordinal) {
@@ -3012,9 +3018,11 @@ if (typeof module !== 'undefined') {
     reconcileFamilyMetaAfterDelete,
     // Formatting
     formatTimestamp,
+    formatFamilySpan,
     formatFileSize,
     getProjectColor,
     esc,
+    truncateDisplayText,
     getFamilyForkCount,
     getVersionLabelText,
     // Meta
