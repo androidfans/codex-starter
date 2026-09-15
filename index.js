@@ -184,10 +184,17 @@ function getSessionDisplayTitle(session) {
   return session.customTitle || session.aiTitle || session.topic || '';
 }
 
+function splitGraphemes(text) {
+  return Array.from(
+    graphemeSegmenter.segment(String(text || '')),
+    part => part.segment,
+  );
+}
+
 function getForkReason(session) {
   if (!session) return '';
   const topic = session.topic && session.topic !== PENDING_TOPIC ? session.topic : '';
-  return trimTopic(session.customTitle || topic || session.aiTitle || '', 120);
+  return splitGraphemes(session.customTitle || topic || session.aiTitle).slice(0, 120).join('');
 }
 
 // ─── Session Meta ────────────────────────────────────────────────────
@@ -1489,10 +1496,7 @@ function truncateDisplayText(text, maxLength) {
   if (maxLength <= 0) return '';
   if (stringWidth(value) <= maxLength) return value;
   if (maxLength < stringWidth('…')) return '';
-  const characters = Array.from(
-    graphemeSegmenter.segment(value),
-    part => part.segment,
-  );
+  const characters = splitGraphemes(value);
   let low = 0;
   let high = characters.length;
   while (low < high) {

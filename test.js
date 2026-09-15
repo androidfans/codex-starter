@@ -115,6 +115,10 @@ describe('helpers', () => {
     assert.equal(truncateDisplayText('你好世界', 5), '你好…');
     assert.equal(truncateDisplayText('👨‍👩‍👧‍👦abc', 3), '👨‍👩‍👧‍👦…');
     assert.equal(truncateDisplayText('a'.repeat(10000), 10), 'a'.repeat(9) + '…');
+    assert.equal(
+      getForkReason({ topic: 'a'.repeat(119) + '😀tail' }),
+      'a'.repeat(119) + '😀',
+    );
   });
 
   it('escapes literal braces with blessed-compatible tags', () => {
