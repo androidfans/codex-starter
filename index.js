@@ -1522,74 +1522,9 @@ async function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createForkTreeDemoSessions(now = Date.now()) {
-  const sessions = [];
-  const project = 'codex-starter-demo';
-  const cwd = path.join(process.cwd(), 'demo-workspace');
-  const mainTitle = 'Redesign deeply nested Fork history';
-  const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  const timestamp = (daysAgo, minuteOffset = 0) => new Date(
-    today.getTime() - (daysAgo * 86400000) + (minuteOffset * 60000),
-  ).toISOString();
-
-  function add(sessionId, forkedFromId, firstTs, topic = mainTitle, isLatest = false) {
-    sessions.push({
-      sessionId,
-      forkedFromId,
-      ancestorIds: [],
-      firstTs,
-      lastTs: isLatest ? timestamp(1, 15 * 60) : firstTs,
-      topic,
-      aiTitle: topic,
-      customTitle: '',
-      project,
-      cwd,
-      source: 'cli',
-      originator: 'codex-tui',
-      gitBranch: 'demo/compact-fork-tree',
-      version: 'demo',
-      modelProvider: 'openai',
-      fileSize: 18000,
-      duration: '12m',
-      estimatedMessages: 8,
-      totalMessages: 8,
-      userMessages: ['Show the Fork history without wasting horizontal space.'],
-      assistantSnippets: ['Linear chains stay flat; indentation now represents real branch points only.'],
-      toolsUsed: [],
-      searchText: `${topic} Fork history linear chain`,
-      _detailLoaded: true,
-      _searchIndexed: true,
-    });
-  }
-
-  add('demo-root', '', timestamp(5));
-  let parentId = 'demo-root';
-  for (let index = 1; index <= 18; index++) {
-    const id = `demo-trunk-${String(index).padStart(2, '0')}`;
-    const daysAgo = 5 - Math.min(3, Math.floor(index / 5));
-    add(id, parentId, timestamp(daysAgo, index * 31));
-    parentId = id;
-  }
-
-  const activeReason = 'Flatten linear chains and indent only at real branches';
-  add('demo-active-01', parentId, timestamp(2, 17 * 60), activeReason);
-  add('demo-active-02', 'demo-active-01', timestamp(1, 10 * 60), activeReason);
-  add('demo-active-03', 'demo-active-02', timestamp(1, 15 * 60), activeReason, true);
-  add('demo-alt-01', parentId, timestamp(2, 18 * 60), 'Alternative: keep the classic nested tree');
-  add('demo-alt-02', 'demo-alt-01', timestamp(2, 20 * 60), 'Alternative: keep the classic nested tree');
-
-  return sessions;
-}
-
-function createApp({
-  activateInputSource = createInputSourceActivator(),
-  sessions: providedSessions,
-  providedMeta,
-  demoMode = false,
-} = {}) {
-  const allSessions = providedSessions || loadAllSessions();
-  const meta = providedMeta || (demoMode ? { sessions: {} } : loadMeta());
+function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
+  const allSessions = loadAllSessions();
+  const meta = loadMeta();
 
   // Apply meta customTitles — these take priority over JSONL titles
   // so renames persist even after continuing a conversation
@@ -1662,8 +1597,7 @@ function createApp({
   });
 
   function updateHeader() {
-    const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`
-      + (demoMode ? ' {#ffd166-fg}[CHAIN DEMO]{/}' : '');
+    const title = `{bold}{#ff7a1a-fg}${APP_NAME}{/}`;
     const count = `{#a3e635-fg}${filteredFamilies.length}{/}{#8a8178-fg}/${allFamilies.length} conversations · ${allSessions.length} versions{/}`;
     const proj = `{#ffd166-fg}${uniqueProjects.length}{/}{#8a8178-fg} projects{/}`;
     const sort = `{#5bd1b9-fg}[${sortMode}]{/}`;
@@ -1772,13 +1706,6 @@ function createApp({
       '{#ff5d73-fg}{bold}x{/} {#ff5d73-fg}Delete{/}',
       '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}',
     ];
-    if (demoMode) {
-      keys.splice(0, keys.length,
-        '{#ff7a1a-fg}{bold}↑↓{/} {#ff7a1a-fg}Navigate{/}',
-        '{#ffd166-fg}{bold}←→ / h l{/} {#ffd166-fg}Fold / unfold{/}',
-        '{#8a8178-fg}Linear depth stays flat · branches indent{/}',
-        '{#8a8178-fg}{bold}q{/} {#8a8178-fg}Quit{/}');
-    }
     footer.setContent(`\n ${keys.join(' {#3a3f46-fg}│{/} ')}`);
   }
 
@@ -2297,14 +2224,8 @@ function createApp({
   function cycleLaunchMode() {
     const currentIndex = LAUNCH_MODES.findIndex(mode => mode.id === launchModeId);
     launchModeId = LAUNCH_MODES[(currentIndex + 1) % LAUNCH_MODES.length].id;
-    if (!demoMode) setDefaultLaunchMode(meta, launchModeId);
+    setDefaultLaunchMode(meta, launchModeId);
     renderAll();
-  }
-
-  function showDemoNotice() {
-    footer.setContent('\n  {#ffd166-fg}{bold}Demo data is read-only.{/} {#8a8178-fg}Use ←/→ or h/l to compare folded and expanded views.{/}');
-    screen.render();
-    setTimeout(() => { updateFooter(); screen.render(); }, 1800);
   }
 
   // ─── Project Picker ────────────────────────────────────────────────────
@@ -2398,6 +2319,17 @@ function createApp({
     if (isSearchMode) { isSearchMode = false; updateHeader(); updateFooter(); screen.render(); }
     moveSelection(-1);
   });
+  function keepSelectedListRowVisible() {
+    const visibleRows = Math.max(1, listPanel.height || 1);
+    const selectedListIndex = selectedIndex + 1;
+    const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
+    let nextBase = Math.min(listPanel.childBase, maxBase);
+    if (selectedListIndex < nextBase) nextBase = selectedListIndex;
+    if (selectedListIndex >= nextBase + visibleRows) {
+      nextBase = selectedListIndex - visibleRows + 1;
+    }
+    listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+  }
   function expandSelectedNode() {
     if (renameMode || popupOpen || isSearchMode || selectedIndex < 0) return;
     const row = displayRows[selectedIndex];
@@ -2424,6 +2356,7 @@ function createApp({
       expandedChainIds.delete(row.chainId);
       displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
       selectedIndex = displayRows.findIndex(candidate => candidate.key === `chain:${row.chainId}`);
+      keepSelectedListRowVisible();
       renderAll();
       return;
     }
@@ -2431,15 +2364,7 @@ function createApp({
     expandedFamilyIds.delete(row.family.familyId);
     displayRows = buildVisibleSessionRows(filteredFamilies, expandedFamilyIds, expandedChainIds);
     selectedIndex = displayRows.findIndex(candidate => candidate.key === familyKey);
-    const visibleRows = Math.max(1, listPanel.height || 1);
-    const selectedListIndex = selectedIndex + 1;
-    const maxBase = Math.max(0, displayRows.length + 1 - visibleRows);
-    let nextBase = Math.min(listPanel.childBase, maxBase);
-    if (selectedListIndex < nextBase) nextBase = selectedListIndex;
-    if (selectedListIndex >= nextBase + visibleRows) {
-      nextBase = selectedListIndex - visibleRows + 1;
-    }
-    listPanel.childBase = Math.max(0, Math.min(nextBase, maxBase));
+    keepSelectedListRowVisible();
     renderAll();
   }
   screen.key(['right'], expandSelectedNode);
@@ -2588,7 +2513,6 @@ function createApp({
   // ─── Resume Session ─────────────────────────────────────────────────────
 
   function resumeSession(session, overrideModeId = null) {
-    if (demoMode) { showDemoNotice(); return; }
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
@@ -2616,7 +2540,6 @@ function createApp({
   }
 
   function startNewSession(overrideModeId = null) {
-    if (demoMode) { showDemoNotice(); return; }
     cancelSearchIndexing();
     process.stdout.write('\x1b[0m');
     screen.destroy();
@@ -2682,7 +2605,14 @@ function createApp({
   screen.key(['c'], () => {
     if (renameMode || isSearchMode) return;
     if (displayRows.length === 0 || selectedIndex < 0) return;
-    const sid = displayRows[selectedIndex].session.sessionId;
+    const row = displayRows[selectedIndex];
+    if (row.kind === 'chain') {
+      footer.setContent('\n  {#ffd166-fg}{bold}Expand this chain first{/}{#8a8178-fg} to copy a specific session ID{/}');
+      screen.render();
+      setTimeout(() => { updateFooter(); screen.render(); }, 1800);
+      return;
+    }
+    const sid = row.session.sessionId;
     try {
       if (!copyToClipboard(sid)) throw new Error('clipboard unavailable');
       footer.setContent(`\n  {#a3e635-fg}{bold}✓ Copied:{/} {#5ad1e6-fg}${sid}{/}`);
@@ -2770,7 +2700,6 @@ function createApp({
 
   screen.key(['x', 'delete'], () => {
     if (renameMode || isSearchMode || popupOpen) return;
-    if (demoMode) { showDemoNotice(); return; }
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
     const row = displayRows[selectedIndex];
     if (row.kind === 'family' || row.kind === 'chain') {
@@ -2919,7 +2848,6 @@ function createApp({
 
   screen.key([','], () => {
     if (isSearchMode || popupOpen) return;
-    if (demoMode) { showDemoNotice(); return; }
     if (selectedIndex < 0 || selectedIndex >= displayRows.length) return;
     if (displayRows[selectedIndex].kind === 'chain') { expandSelectedNode(); return; }
     showRenameInput(displayRows[selectedIndex]);
@@ -3044,7 +2972,6 @@ if (typeof module !== 'undefined') {
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,
-    createForkTreeDemoSessions,
     getFamilyTitleForRow,
     rowTargetsFamilyTitle,
     reconcileFamilyMetaAfterDelete,
@@ -3139,7 +3066,6 @@ if (require.main === module) {
 
 Usage:
   codex-starter              Launch interactive TUI
-  codex-starter --demo       Preview compact Fork-chain rendering
   codex-starter --list [N]   Print latest N sessions (default: 30)
   codex-starter --version    Show version
   codex-starter --update     Update to the latest version
@@ -3176,13 +3102,6 @@ TUI Keyboard Shortcuts:
         process.exit(1);
       },
     );
-  } else if (args.includes('--demo')) {
-    createApp({
-      activateInputSource: () => {},
-      sessions: createForkTreeDemoSessions(),
-      providedMeta: { sessions: {} },
-      demoMode: true,
-    });
   } else {
     const activateInputSource = createInputSourceActivator();
     activateInputSource();

@@ -31,7 +31,6 @@ const {
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
-  createForkTreeDemoSessions,
   getFamilyTitleForRow,
   rowTargetsFamilyTitle,
   reconcileFamilyMetaAfterDelete,
@@ -1072,6 +1071,29 @@ describe('fork families', () => {
     };
   }
 
+  function forkTreeFixture() {
+    const atHour = hour => new Date(Date.UTC(2026, 8, 10, hour)).toISOString();
+    const sessions = [session('demo-root', '', atHour(0))];
+    let parentId = 'demo-root';
+    for (let index = 1; index <= 18; index++) {
+      const id = `demo-trunk-${String(index).padStart(2, '0')}`;
+      sessions.push(session(id, parentId, atHour(index)));
+      parentId = id;
+    }
+
+    const activeReason = 'Flatten linear chains and indent only at real branches';
+    const active1 = session('demo-active-01', parentId, atHour(19));
+    const active2 = session('demo-active-02', active1.sessionId, atHour(20));
+    const active3 = session('demo-active-03', active2.sessionId, atHour(23));
+    active1.topic = activeReason;
+    active2.topic = activeReason;
+    active3.topic = activeReason;
+    const alternative1 = session('demo-alt-01', parentId, atHour(21));
+    const alternative2 = session('demo-alt-02', alternative1.sessionId, atHour(22));
+    sessions.push(active1, active2, active3, alternative1, alternative2);
+    return sessions;
+  }
+
   it('keeps singletons as ordinary session rows', () => {
     const only = session('only', '', '2026-04-13T01:00:00.000Z');
     const families = buildSessionFamilies([only]);
@@ -1153,7 +1175,7 @@ describe('fork families', () => {
   });
 
   it('keeps linear depth flat and indents only after a real branch', () => {
-    const demoSessions = createForkTreeDemoSessions(new Date('2026-09-15T12:00:00').getTime());
+    const demoSessions = forkTreeFixture();
     const families = buildSessionFamilies(demoSessions);
     const family = families[0];
     const collapsed = buildVisibleSessionRows(families, new Set());

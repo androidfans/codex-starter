@@ -65,7 +65,7 @@ Session summaries and completed search indexes are cached in `~/.codex/codex-sta
 - Dangerous mode with `d`, remembered for the next launch
 - Explicit launch mode selector with `m`, persisted locally
 - Project filter with `p`
-- Fork families collapsed into one row, with Finder-style expansion
+- Fork families with flat linear runs, labeled branch reasons, and nested chain folding
 - Full conversation history in an independently scrollable preview
 - Codex AI-generated conversation titles, with graceful fallback to the first prompt
 - Cached startup that only reparses new or changed rollouts
@@ -77,18 +77,6 @@ Session summaries and completed search indexes are cached in `~/.codex/codex-sta
 - Self-update with `--update`
 - Launches through your interactive shell so existing shell wrappers and env loaders still apply
 - Fully local, no network, no telemetry
-
-## Fork Chain Demo
-
-Preview the compact rendering with a read-only synthetic 23-Fork history:
-
-```bash
-npm run demo
-```
-
-Press `↓` to select the chain, `→`/`l` to expand it, `←`/`h` to fold it, and `q` to quit. Linear nodes remain in one column; indentation appears only at real `fork×N` branch points, whose direct branches are numbered `①`, `②`, and so on.
-
-Maximal branch-free runs of four or more versions fold into a second-level `Chain × N` row. `→`/`l`/`Enter` expands that run in place; `←`/`h` from any member folds it back before folding the whole conversation.
 
 ## Keyboard Shortcuts
 
