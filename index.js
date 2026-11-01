@@ -128,7 +128,6 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
-const THREAD_NAME_BUSY_TIMEOUT_MS = 750;
 const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
 
@@ -153,8 +152,6 @@ function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSy
   try {
     const result = runCommand('sqlite3', [
       '-readonly',
-      '-cmd',
-      `.timeout ${THREAD_NAME_BUSY_TIMEOUT_MS}`,
       '-json',
       databasePath,
       "SELECT id, name FROM threads WHERE name IS NOT NULL AND trim(name) <> '';",
@@ -420,6 +417,31 @@ function readTailText(filePath, bytes = 16 * 1024) {
     fs.closeSync(fd);
   }
   return buffer.toString('utf-8');
+}
+
+function forEachLineSync(filePath, callback) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      pending += decoder.write(buffer.subarray(0, bytesRead));
+      let newlineIndex;
+      while ((newlineIndex = pending.indexOf('\n')) !== -1) {
+        const line = pending.substring(0, newlineIndex);
+        pending = pending.substring(newlineIndex + 1);
+        if (line.trim()) callback(line);
+      }
+    }
+    pending += decoder.end();
+    if (pending.trim()) callback(pending);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function extractTextParts(content) {
@@ -746,18 +768,62 @@ function loadSessionQuick(filePath, options = {}) {
 function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
   const conversationMessages = [];
-  const seenConversationRecords = new Set();
+  const sourceOrderedRecords = [];
+  const seenTimestampedRecords = new Set();
   const toolsUsed = new Set();
   const filePaths = (session.rolloutFilePaths || [session.filePath])
     .filter(filePath => filePath && fs.existsSync(filePath))
     .sort((a, b) => a.localeCompare(b));
   let canonicalMetaLoaded = false;
 
-  for (const filePath of filePaths) {
-    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
-    for (const line of lines) {
+  function recordKey(record) {
+    const body = record.isTurnBoundary
+      ? 'turn-boundary'
+      : [record.message.role, record.message.phase, record.message.text].join('\0');
+    return record.timestamp ? `${record.timestamp}\0${body}` : body;
+  }
+
+  function replayedPrefixLength(previous, next) {
+    if (previous.length === 0 || next.length === 0) return 0;
+    const pattern = next.map(recordKey);
+    const separator = Symbol('rollout-boundary');
+    const sequence = [...pattern, separator, ...previous.map(recordKey)];
+    const prefix = new Array(sequence.length).fill(0);
+    for (let index = 1; index < sequence.length; index++) {
+      let candidate = prefix[index - 1];
+      while (candidate > 0 && sequence[index] !== sequence[candidate]) {
+        candidate = prefix[candidate - 1];
+      }
+      if (sequence[index] === sequence[candidate]) candidate++;
+      prefix[index] = candidate;
+    }
+    let maximum = 0;
+    for (let index = pattern.length + 1; index < prefix.length; index++) {
+      maximum = Math.max(maximum, prefix[index]);
+    }
+    return Math.min(pattern.length, maximum);
+  }
+
+  function fileNameTimestamp(filePath) {
+    const match = path.basename(filePath).match(
+      /rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/,
+    );
+    if (!match) return NaN;
+    return new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`).getTime();
+  }
+
+  filePaths.forEach((filePath, fileIndex) => {
+    const fileRecords = [];
+    let fileAnchorTime = fileNameTimestamp(filePath);
+    let lineIndex = 0;
+    forEachLineSync(filePath, (line) => {
       try {
         const entry = JSON.parse(line);
+        const timestamp = getEntryTimestamp(entry);
+        const timestampMs = timestamp ? new Date(timestamp).getTime() : NaN;
+        if (!Number.isFinite(fileAnchorTime) && Number.isFinite(timestampMs)) {
+          fileAnchorTime = timestampMs;
+        }
         // Fork rollouts contain inherited session_meta records from their
         // ancestors. Only metadata from the selected physical rollout should
         // update the representative session; other same-id files contribute
@@ -779,26 +845,71 @@ function loadSessionDetail(session) {
         }
 
         const message = getConversationMessage(entry);
-        const timestamp = getEntryTimestamp(entry);
-        const fingerprint = message && timestamp
-          ? [timestamp, message.role, message.phase, message.text].join('\0')
-          : '';
-        if (message) {
-          if (!fingerprint || !seenConversationRecords.has(fingerprint)) {
-            appendConversationMessage(conversationMessages, message);
-            if (fingerprint) seenConversationRecords.add(fingerprint);
-          }
-        } else {
-          appendConversationEntry(conversationMessages, entry);
+        const payload = entry.payload || {};
+        const isTurnBoundary = entry.type === 'event_msg'
+          && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
+        if (message || isTurnBoundary) {
+          fileRecords.push({
+            message,
+            isTurnBoundary,
+            timestamp: timestamp || '',
+            timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+            fileIndex,
+            lineIndex,
+          });
         }
 
         if (entry.type === 'response_item') {
-          const payload = entry.payload || {};
           if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
         }
         const titleUpdate = getCustomTitleUpdate(entry);
         if (titleUpdate !== null) session.customTitle = titleUpdate;
       } catch (_) { /* ignore */ }
+      lineIndex++;
+    });
+
+    const fallbackTime = Number.isFinite(fileAnchorTime) ? fileAnchorTime : fileIndex;
+    const nextTimestamp = new Array(fileRecords.length).fill(null);
+    let followingTime = null;
+    for (let index = fileRecords.length - 1; index >= 0; index--) {
+      nextTimestamp[index] = followingTime;
+      if (fileRecords[index].timestampMs !== null) followingTime = fileRecords[index].timestampMs;
+    }
+    let precedingTime = null;
+    for (let index = 0; index < fileRecords.length; index++) {
+      const record = fileRecords[index];
+      if (record.timestampMs !== null) {
+        record.sortTime = record.timestampMs;
+        precedingTime = record.timestampMs;
+      } else {
+        // Tie timestamp-less legacy records to their nearest timed neighbor;
+        // file/line tie-breakers below preserve their local source order.
+        record.sortTime = precedingTime ?? nextTimestamp[index] ?? fallbackTime;
+      }
+    }
+
+    // Resumed legacy rollouts can prefix new activity with timestamp-less
+    // records copied from earlier history. Collapse only the exact replayed
+    // prefix; later repeated turns in the fragment remain distinct.
+    const overlap = replayedPrefixLength(sourceOrderedRecords, fileRecords);
+    for (const record of fileRecords.slice(overlap)) {
+      const key = record.timestamp ? recordKey(record) : '';
+      if (key && seenTimestampedRecords.has(key)) continue;
+      if (key) seenTimestampedRecords.add(key);
+      sourceOrderedRecords.push(record);
+    }
+  });
+
+  sourceOrderedRecords.sort((a, b) => a.sortTime - b.sortTime
+    || a.fileIndex - b.fileIndex
+    || a.lineIndex - b.lineIndex);
+  for (const record of sourceOrderedRecords) {
+    if (record.isTurnBoundary) {
+      if (!conversationMessages.at(-1)?.isTurnBoundary) {
+        conversationMessages.push({ isTurnBoundary: true });
+      }
+    } else {
+      appendConversationMessage(conversationMessages, record.message);
     }
   }
 
@@ -2296,6 +2407,12 @@ function createApp({
     }, delay);
   }
 
+  function cancelThreadNameRetry() {
+    if (!threadNameRetryTimer) return;
+    clearTimeout(threadNameRetryTimer);
+    threadNameRetryTimer = null;
+  }
+
   function applyPendingIndexRefresh() {
     if (!pendingIndexRefresh || popupOpen || renameMode) return false;
     pendingIndexRefresh = false;
@@ -2651,6 +2768,7 @@ function createApp({
 
   function resumeSession(session, overrideModeId = null) {
     cancelSearchIndexing();
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -2678,6 +2796,7 @@ function createApp({
 
   function startNewSession(overrideModeId = null) {
     cancelSearchIndexing();
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -2994,7 +3113,7 @@ function createApp({
   screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
   function quitApp() {
     cancelSearchIndexing();
-    if (threadNameRetryTimer) clearTimeout(threadNameRetryTimer);
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
     process.exit(0);
