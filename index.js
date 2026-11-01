@@ -794,33 +794,6 @@ function loadSessionDetail(session) {
     return record.timestamp ? `${record.timestamp}\0${body}` : body;
   }
 
-  function replayedPrefixLength(previous, next) {
-    if (previous.length === 0 || next.length === 0) return 0;
-    const pattern = next.map(recordKey);
-    const separator = Symbol('rollout-boundary');
-    const sequence = [...pattern, separator, ...previous.map(recordKey)];
-    const prefix = new Array(sequence.length).fill(0);
-    for (let index = 1; index < sequence.length; index++) {
-      let candidate = prefix[index - 1];
-      while (candidate > 0 && sequence[index] !== sequence[candidate]) {
-        candidate = prefix[candidate - 1];
-      }
-      if (sequence[index] === sequence[candidate]) candidate++;
-      prefix[index] = candidate;
-    }
-    let maximum = 0;
-    for (let index = pattern.length + 1; index < prefix.length; index++) {
-      maximum = Math.max(maximum, prefix[index]);
-    }
-    const overlap = Math.min(pattern.length, maximum);
-    const replay = next.slice(0, overlap);
-    const hasUserAndAssistant = replay.some(record => record.message?.role === 'user')
-      && replay.some(record => record.message?.role === 'assistant');
-    // A single repeated prompt can be a legitimate new turn. Only remove a
-    // multi-record exchange, which is strong evidence of copied history.
-    return overlap >= 2 && hasUserAndAssistant ? overlap : 0;
-  }
-
   function fileNameTimestamp(filePath) {
     const match = path.basename(filePath).match(
       /rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/,
@@ -903,11 +876,9 @@ function loadSessionDetail(session) {
       }
     }
 
-    // Resumed legacy rollouts can prefix new activity with timestamp-less
-    // records copied from earlier history. Collapse only the exact replayed
-    // prefix; later repeated turns in the fragment remain distinct.
-    const overlap = replayedPrefixLength(sourceOrderedRecords, fileRecords);
-    for (const record of fileRecords.slice(overlap)) {
+    for (const record of fileRecords) {
+      // Content equality cannot distinguish a timestamp-less history replay
+      // from an intentional retry, so preserve it rather than lose a turn.
       const key = record.timestamp ? recordKey(record) : '';
       if (key && seenTimestampedRecords.has(key)) continue;
       if (key) seenTimestampedRecords.add(key);
@@ -2925,6 +2896,7 @@ function createApp({
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
+      attachSessionRolloutFiles(allSessions);
       reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
       saveMeta(meta);
       flushSessionCache(allSessions);
@@ -3245,6 +3217,7 @@ if (typeof module !== 'undefined') {
     flushSessionCache,
     isInteractiveSession,
     loadAllSessions,
+    attachSessionRolloutFiles,
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,

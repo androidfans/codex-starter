@@ -29,6 +29,7 @@ const {
   flushSessionCache,
   isInteractiveSession,
   loadAllSessions,
+  attachSessionRolloutFiles,
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
@@ -422,10 +423,12 @@ describe('session parsing', () => {
         },
       },
       {
+        timestamp: '2026-04-10T01:00:01.000Z',
         type: 'event_msg',
         payload: { type: 'user_message', message: 'original request' },
       },
       {
+        timestamp: '2026-04-10T01:00:02.000Z',
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'first response' },
       },
@@ -449,10 +452,12 @@ describe('session parsing', () => {
         },
       },
       {
+        timestamp: '2026-04-10T01:00:01.000Z',
         type: 'event_msg',
         payload: { type: 'user_message', message: 'original request' },
       },
       {
+        timestamp: '2026-04-10T01:00:02.000Z',
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'first response' },
       },
@@ -502,6 +507,11 @@ describe('session parsing', () => {
       assert.equal(fragments[0].customTitle, '');
       assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
       assert.equal(fragments[0].duration, '10m');
+
+      const survivor = fragments[1];
+      attachSessionRolloutFiles(sessions.filter(candidate => candidate !== fragments[0]));
+      assert.deepEqual(survivor.rolloutFilePaths, [continuedPath]);
+      assert.equal(survivor.rolloutFirstTs, '2026-04-11T01:00:00.000Z');
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuedPath);
@@ -515,7 +525,7 @@ describe('session parsing', () => {
     ]);
     const resumedPath = writeSession('2026/04/09/rollout-2026-04-09T01-00-00-repeat.jsonl', [
       { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
-      { type: 'event_msg', payload: { type: 'agent_message', message: 'new answer' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'old answer' } },
     ]);
     const session = {
       sessionId: 'repeat',
@@ -527,7 +537,7 @@ describe('session parsing', () => {
     try {
       loadSessionDetail(session);
       assert.deepEqual(session.userMessages, ['retry', 'retry']);
-      assert.deepEqual(session.assistantSnippets, ['old answer', 'new answer']);
+      assert.deepEqual(session.assistantSnippets, ['old answer', 'old answer']);
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(resumedPath);
