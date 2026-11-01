@@ -18,6 +18,7 @@ const {
   loadSessionQuick,
   loadSessionDetail,
   findLatestCodexStateDatabase,
+  loadCodexThreadNamesResult,
   loadCodexThreadNames,
   applyCodexThreadNames,
   getSessionDisplayTitle,
@@ -158,12 +159,37 @@ describe('helpers', () => {
 
     assert.equal(findLatestCodexStateDatabase(), newestDatabase);
     assert.equal(calls[0].command, 'sqlite3');
-    assert.equal(calls[0].args[2], newestDatabase);
+    assert.ok(calls[0].args.includes(newestDatabase));
+    assert.deepEqual(calls[0].args.slice(0, 3), ['-readonly', '-cmd', '.timeout 750']);
+    assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal(names.get('thread-a'), 'Fix login redirect');
     assert.equal(names.has('thread-empty'), false);
 
     fs.unlinkSync(olderDatabase);
     fs.unlinkSync(newestDatabase);
+  });
+
+  it('distinguishes a failed AI-title query from a valid empty result', () => {
+    const database = path.join(CODEX_DIR, 'state_5.sqlite');
+    fs.writeFileSync(database, '');
+
+    const failed = loadCodexThreadNamesResult({
+      runCommand() {
+        return { status: 5, stderr: 'database is locked', stdout: '' };
+      },
+    });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.names.size, 0);
+
+    const empty = loadCodexThreadNamesResult({
+      runCommand() {
+        return { status: 0, stdout: '[]' };
+      },
+    });
+    assert.equal(empty.ok, true);
+    assert.equal(empty.names.size, 0);
+
+    fs.unlinkSync(database);
   });
 
   it('prefers manual titles, then Codex AI titles, then the first prompt', () => {
@@ -380,6 +406,77 @@ describe('session parsing', () => {
     assert.deepEqual(session.toolsUsed, ['exec_command']);
     assert.equal(session.totalMessages, 2);
     assert.equal(session.project, 'test/Desktop/project-beta');
+  });
+
+  it('merges same-session rollout fragments into one chronological conversation', () => {
+    const firstPath = writeSession('2026/04/10/rollout-2026-04-10T01-00-00-sess-resumed.jsonl', [
+      {
+        timestamp: '2026-04-10T01:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-resumed',
+          timestamp: '2026-04-10T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-resumed',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-10T01:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'original request' },
+      },
+      {
+        timestamp: '2026-04-10T01:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'first response' },
+      },
+    ]);
+    const continuedPath = writeSession('2026/04/11/rollout-2026-04-11T01-00-00-sess-resumed.jsonl', [
+      {
+        timestamp: '2026-04-11T01:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-resumed',
+          timestamp: '2026-04-10T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-resumed',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-10T01:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'first response' },
+      },
+      {
+        timestamp: '2026-04-11T01:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'continued request' },
+      },
+      {
+        timestamp: '2026-04-11T01:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'continued response' },
+      },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const fragments = sessions.filter(session => session.sessionId === 'sess-resumed');
+      assert.equal(fragments.length, 2);
+      assert.equal(fragments[0].filePath, continuedPath, 'the newest rollout remains representative');
+      assert.deepEqual(fragments[0].rolloutFilePaths, [firstPath, continuedPath]);
+
+      loadSessionDetail(fragments[0]);
+      assert.deepEqual(fragments[0].userMessages, ['original request', 'continued request']);
+      assert.deepEqual(fragments[0].assistantSnippets, ['first response', 'continued response']);
+      assert.equal(fragments[0].topic, 'original request');
+      assert.equal(fragments[0].totalMessages, 4);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(continuedPath);
+    }
   });
 
   it('deduplicates mirrored message records without removing repeated turns', () => {

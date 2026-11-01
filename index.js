@@ -128,6 +128,8 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
+const THREAD_NAME_BUSY_TIMEOUT_MS = 750;
+const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
 
 function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
@@ -144,33 +146,41 @@ function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
   }
 }
 
-function loadCodexThreadNames({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
+function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
   const databasePath = findLatestCodexStateDatabase(codexDir);
-  if (!databasePath) return new Map();
+  if (!databasePath) return { ok: true, names: new Map() };
 
   try {
     const result = runCommand('sqlite3', [
       '-readonly',
+      '-cmd',
+      `.timeout ${THREAD_NAME_BUSY_TIMEOUT_MS}`,
       '-json',
       databasePath,
       "SELECT id, name FROM threads WHERE name IS NOT NULL AND trim(name) <> '';",
     ], {
       encoding: 'utf-8',
       maxBuffer: 16 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (result.error || result.status !== 0) return new Map();
+    if (result.error || result.status !== 0) {
+      return { ok: false, names: new Map() };
+    }
 
     const rows = JSON.parse(String(result.stdout || '[]') || '[]');
-    return new Map(rows
+    return { ok: true, names: new Map(rows
       .filter(row => row && typeof row.id === 'string' && typeof row.name === 'string')
       .map(row => [row.id, row.name.trim()])
-      .filter(([, name]) => name));
+      .filter(([, name]) => name)) };
   } catch (_) {
     // AI titles are an optional enhancement. Older Codex versions and Linux
     // systems without the sqlite3 CLI continue to use the first user message.
-    return new Map();
+    return { ok: false, names: new Map() };
   }
+}
+
+function loadCodexThreadNames(options = {}) {
+  return loadCodexThreadNamesResult(options).names;
 }
 
 function applyCodexThreadNames(sessions, threadNames = loadCodexThreadNames()) {
@@ -602,6 +612,21 @@ function walkSessionFiles(dir) {
   return results;
 }
 
+function attachSessionRolloutFiles(sessions) {
+  const pathsBySessionId = new Map();
+  for (const session of sessions) {
+    if (!session.sessionId || !session.filePath) continue;
+    if (!pathsBySessionId.has(session.sessionId)) pathsBySessionId.set(session.sessionId, []);
+    pathsBySessionId.get(session.sessionId).push(session.filePath);
+  }
+
+  for (const session of sessions) {
+    const filePaths = pathsBySessionId.get(session.sessionId) || [session.filePath];
+    session.rolloutFilePaths = [...new Set(filePaths)].sort((a, b) => a.localeCompare(b));
+  }
+  return sessions;
+}
+
 function loadSessionQuick(filePath, options = {}) {
   const stat = options.stat || fs.statSync(filePath);
   const sessionLabel = path.basename(filePath, '.jsonl');
@@ -720,43 +745,61 @@ function loadSessionQuick(filePath, options = {}) {
 
 function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
-  const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
-
   const conversationMessages = [];
+  const seenConversationRecords = new Set();
   const toolsUsed = new Set();
+  const filePaths = (session.rolloutFilePaths || [session.filePath])
+    .filter(filePath => filePath && fs.existsSync(filePath))
+    .sort((a, b) => a.localeCompare(b));
   let canonicalMetaLoaded = false;
 
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line);
-      // Fork rollouts contain inherited session_meta records from their
-      // ancestors. Only the first record describes this file's canonical
-      // thread; applying later records would replace the child UUID with a
-      // parent UUID.
-      if (entry.type === 'session_meta' && !canonicalMetaLoaded) {
-        canonicalMetaLoaded = true;
-        const payload = entry.payload || {};
-        session.sessionId = payload.id || session.sessionId;
-        session.firstTs = payload.timestamp || session.firstTs;
-        session.cwd = payload.cwd || session.cwd;
-        session.project = getProjectDisplayName(session.cwd);
-        session.version = payload.cli_version || session.version;
-        session.modelProvider = payload.model_provider || session.modelProvider;
-        session.source = payload.source || session.source;
-        session.originator = payload.originator || session.originator;
-        session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
-        session.threadSource = payload.thread_source || session.threadSource || '';
-      }
+  for (const filePath of filePaths) {
+    const lines = fs.readFileSync(filePath, 'utf-8').split('\n').filter(Boolean);
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        // Fork rollouts contain inherited session_meta records from their
+        // ancestors. Only metadata from the selected physical rollout should
+        // update the representative session; other same-id files contribute
+        // conversation history only.
+        if (filePath === session.filePath
+            && entry.type === 'session_meta' && !canonicalMetaLoaded) {
+          canonicalMetaLoaded = true;
+          const payload = entry.payload || {};
+          session.sessionId = payload.id || session.sessionId;
+          session.firstTs = payload.timestamp || session.firstTs;
+          session.cwd = payload.cwd || session.cwd;
+          session.project = getProjectDisplayName(session.cwd);
+          session.version = payload.cli_version || session.version;
+          session.modelProvider = payload.model_provider || session.modelProvider;
+          session.source = payload.source || session.source;
+          session.originator = payload.originator || session.originator;
+          session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+          session.threadSource = payload.thread_source || session.threadSource || '';
+        }
 
-      appendConversationEntry(conversationMessages, entry);
+        const message = getConversationMessage(entry);
+        const timestamp = getEntryTimestamp(entry);
+        const fingerprint = message && timestamp
+          ? [timestamp, message.role, message.phase, message.text].join('\0')
+          : '';
+        if (message) {
+          if (!fingerprint || !seenConversationRecords.has(fingerprint)) {
+            appendConversationMessage(conversationMessages, message);
+            if (fingerprint) seenConversationRecords.add(fingerprint);
+          }
+        } else {
+          appendConversationEntry(conversationMessages, entry);
+        }
 
-      if (entry.type === 'response_item') {
-        const payload = entry.payload || {};
-        if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
-      }
-      const titleUpdate = getCustomTitleUpdate(entry);
-      if (titleUpdate !== null) session.customTitle = titleUpdate;
-    } catch (_) { /* ignore */ }
+        if (entry.type === 'response_item') {
+          const payload = entry.payload || {};
+          if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
+        }
+        const titleUpdate = getCustomTitleUpdate(entry);
+        if (titleUpdate !== null) session.customTitle = titleUpdate;
+      } catch (_) { /* ignore */ }
+    }
   }
 
   const userMessages = conversationMessages
@@ -1101,6 +1144,7 @@ function loadAllSessions(options = {}) {
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  attachSessionRolloutFiles(sessions);
   applyCodexThreadNames(
     sessions,
     options.threadNames === undefined ? loadCodexThreadNames() : options.threadNames,
@@ -1565,8 +1609,13 @@ async function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
-  const allSessions = loadAllSessions();
+function createApp({
+  activateInputSource = createInputSourceActivator(),
+  readThreadNames = loadCodexThreadNamesResult,
+  threadNameRetryDelays = THREAD_NAME_RETRY_DELAYS_MS,
+} = {}) {
+  const initialThreadNames = readThreadNames();
+  const allSessions = loadAllSessions({ threadNames: initialThreadNames.names });
   const meta = loadMeta();
 
   // Apply meta customTitles — these take priority over JSONL titles
@@ -1593,6 +1642,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let pendingIndexRefresh = false;
   let summaryRefreshPending = false;
   let indexRefreshTimer = null;
+  let threadNameRetryTimer = null;
+  let threadNameRetryIndex = 0;
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
@@ -2219,6 +2270,30 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       listPanel.childBase = 0;
     }
     renderAll();
+  }
+
+  function scheduleThreadNameRetry() {
+    if (initialThreadNames.ok || threadNameRetryIndex >= threadNameRetryDelays.length) return;
+    const delay = threadNameRetryDelays[threadNameRetryIndex++];
+    threadNameRetryTimer = setTimeout(() => {
+      threadNameRetryTimer = null;
+      const result = readThreadNames();
+      if (!result.ok) {
+        scheduleThreadNameRetry();
+        return;
+      }
+
+      const changed = allSessions.some(session => (
+        session.aiTitle !== (result.names.get(session.sessionId) || '')
+      ));
+      applyCodexThreadNames(allSessions, result.names);
+      if (!changed) return;
+      if (popupOpen || renameMode) {
+        pendingIndexRefresh = true;
+      } else {
+        applyFilter({ preserveSelection: true });
+      }
+    }, delay);
   }
 
   function applyPendingIndexRefresh() {
@@ -2919,6 +2994,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
   function quitApp() {
     cancelSearchIndexing();
+    if (threadNameRetryTimer) clearTimeout(threadNameRetryTimer);
     process.stdout.write('\x1b[0m');
     screen.destroy();
     process.exit(0);
@@ -2978,6 +3054,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
+  scheduleThreadNameRetry();
   const sessionsToIndex = allSessions.filter(session => !session._searchIndexed);
   const cancelBackgroundIndexing = indexSessionsInBackground(sessionsToIndex, {
     onSessionIndexed: scheduleIndexRefresh,
@@ -3020,6 +3097,7 @@ if (typeof module !== 'undefined') {
     loadSessionQuick,
     loadSessionDetail,
     findLatestCodexStateDatabase,
+    loadCodexThreadNamesResult,
     loadCodexThreadNames,
     applyCodexThreadNames,
     getSessionDisplayTitle,
