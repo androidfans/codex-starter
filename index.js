@@ -668,12 +668,17 @@ function attachSessionRolloutFiles(sessions) {
         new Date(b._rolloutFileLastTs).getTime() - new Date(a._rolloutFileLastTs).getTime()
       ))[0]?._rolloutFileLastTs
       || session.lastTs;
-    if (pathsChanged && session._detailLoaded) {
-      session._detailLoaded = false;
-      delete session.userMessages;
-      delete session.assistantSnippets;
-      delete session.totalMessages;
-      delete session.toolsUsed;
+    if (pathsChanged) {
+      session.firstTs = session._rolloutFileFirstTs;
+      session.lastTs = session._rolloutFileLastTs;
+      session.duration = formatDuration(session.firstTs, session.lastTs);
+      if (session._detailLoaded) {
+        session._detailLoaded = false;
+        delete session.userMessages;
+        delete session.assistantSnippets;
+        delete session.totalMessages;
+        delete session.toolsUsed;
+      }
     }
   }
   return sessions;
@@ -799,7 +804,7 @@ function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
   const conversationMessages = [];
   const sourceOrderedRecords = [];
-  const seenTimestampedRecords = new Set();
+  const timestampedRecordSources = new Map();
   const toolsUsed = new Set();
   const filePaths = (session.rolloutFilePaths || [session.filePath])
     .filter(filePath => filePath && fs.existsSync(filePath))
@@ -899,8 +904,11 @@ function loadSessionDetail(session) {
       // Content equality cannot distinguish a timestamp-less history replay
       // from an intentional retry, so preserve it rather than lose a turn.
       const key = record.timestamp ? recordKey(record) : '';
-      if (key && seenTimestampedRecords.has(key)) continue;
-      if (key) seenTimestampedRecords.add(key);
+      if (key && timestampedRecordSources.has(key)
+          && timestampedRecordSources.get(key) !== record.fileIndex) continue;
+      if (key && !timestampedRecordSources.has(key)) {
+        timestampedRecordSources.set(key, record.fileIndex);
+      }
       sourceOrderedRecords.push(record);
     }
   });

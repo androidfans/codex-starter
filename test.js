@@ -523,11 +523,17 @@ describe('session parsing', () => {
         'detail loading preserves a fresher timestamp found by background indexing');
 
       const survivor = fragments[1];
+      const survivorFileFirstTs = survivor._rolloutFileFirstTs;
+      const survivorFileLastTs = survivor._rolloutFileLastTs;
       survivor._detailLoaded = true;
       survivor.userMessages = ['stale merged detail'];
+      survivor.firstTs = fragments[0].rolloutFirstTs;
+      survivor.lastTs = '2026-04-12T01:00:00.000Z';
       attachSessionRolloutFiles(sessions.filter(candidate => candidate !== fragments[0]));
       assert.deepEqual(survivor.rolloutFilePaths, [continuedPath]);
       assert.equal(survivor.rolloutFirstTs, '2026-04-11T01:00:00.000Z');
+      assert.equal(survivor.firstTs, survivorFileFirstTs);
+      assert.equal(survivor.lastTs, survivorFileLastTs);
       assert.equal(survivor._detailLoaded, false);
       assert.equal(survivor.userMessages, undefined);
     } finally {
@@ -559,6 +565,31 @@ describe('session parsing', () => {
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(resumedPath);
+    }
+  });
+
+  it('preserves same-timestamp repeated turns within one rollout', () => {
+    const timestamp = '2026-04-09T01:00:00.000Z';
+    const filePath = writeSession('2026/04/09/rollout-same-timestamp-repeat.jsonl', [
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { timestamp, type: 'event_msg', payload: { type: 'agent_message', message: 'same answer' } },
+      { timestamp, type: 'event_msg', payload: { type: 'turn_aborted' } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { timestamp, type: 'event_msg', payload: { type: 'agent_message', message: 'same answer' } },
+    ]);
+    const session = {
+      sessionId: 'same-timestamp-repeat',
+      filePath,
+      rolloutFilePaths: [filePath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['retry', 'retry']);
+      assert.deepEqual(session.assistantSnippets, ['same answer', 'same answer']);
+    } finally {
+      fs.unlinkSync(filePath);
     }
   });
 
