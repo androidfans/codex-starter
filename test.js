@@ -508,10 +508,20 @@ describe('session parsing', () => {
       assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
       assert.equal(fragments[0].duration, '10m');
 
+      fragments[0]._detailLoaded = false;
+      fragments[0].lastTs = '2026-04-12T01:00:00.000Z';
+      loadSessionDetail(fragments[0]);
+      assert.equal(fragments[0].lastTs, '2026-04-12T01:00:00.000Z',
+        'detail loading preserves a fresher timestamp found by background indexing');
+
       const survivor = fragments[1];
+      survivor._detailLoaded = true;
+      survivor.userMessages = ['stale merged detail'];
       attachSessionRolloutFiles(sessions.filter(candidate => candidate !== fragments[0]));
       assert.deepEqual(survivor.rolloutFilePaths, [continuedPath]);
       assert.equal(survivor.rolloutFirstTs, '2026-04-11T01:00:00.000Z');
+      assert.equal(survivor._detailLoaded, false);
+      assert.equal(survivor.userMessages, undefined);
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuedPath);

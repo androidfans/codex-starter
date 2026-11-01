@@ -640,22 +640,44 @@ function attachSessionRolloutFiles(sessions) {
   const rolloutsBySessionId = new Map();
   for (const session of sessions) {
     if (!session.sessionId || !session.filePath) continue;
+    if (!Object.hasOwn(session, '_rolloutFileFirstTs')) {
+      session._rolloutFileFirstTs = session.firstTs;
+      session._rolloutFileLastTs = session.lastTs;
+    }
     if (!rolloutsBySessionId.has(session.sessionId)) rolloutsBySessionId.set(session.sessionId, []);
     rolloutsBySessionId.get(session.sessionId).push(session);
   }
 
   for (const session of sessions) {
     const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
-    session.rolloutFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
+    const previousFilePaths = session.rolloutFilePaths || [session.filePath];
+    const nextFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
       .sort((a, b) => a.localeCompare(b));
+    const pathsChanged = previousFilePaths.length !== nextFilePaths.length
+      || previousFilePaths.some((filePath, index) => filePath !== nextFilePaths[index]);
+    session.rolloutFilePaths = nextFilePaths;
     session.rolloutFirstTs = rollouts
-      .filter(rollout => rollout.firstTs)
-      .sort((a, b) => new Date(a.firstTs).getTime() - new Date(b.firstTs).getTime())[0]?.firstTs
+      .filter(rollout => rollout._rolloutFileFirstTs)
+      .sort((a, b) => (
+        new Date(a._rolloutFileFirstTs).getTime() - new Date(b._rolloutFileFirstTs).getTime()
+      ))[0]?._rolloutFileFirstTs
       || session.firstTs;
     session.rolloutLastTs = rollouts
-      .filter(rollout => rollout.lastTs)
-      .sort((a, b) => new Date(b.lastTs).getTime() - new Date(a.lastTs).getTime())[0]?.lastTs
+      .filter(rollout => rollout._rolloutFileLastTs)
+      .sort((a, b) => (
+        new Date(b._rolloutFileLastTs).getTime() - new Date(a._rolloutFileLastTs).getTime()
+      ))[0]?._rolloutFileLastTs
       || session.lastTs;
+    session.firstTs = session.rolloutFirstTs;
+    session.lastTs = session.rolloutLastTs;
+    session.duration = formatDuration(session.firstTs, session.lastTs);
+    if (pathsChanged && session._detailLoaded) {
+      session._detailLoaded = false;
+      delete session.userMessages;
+      delete session.assistantSnippets;
+      delete session.totalMessages;
+      delete session.toolsUsed;
+    }
   }
   return sessions;
 }
@@ -912,8 +934,15 @@ function loadSessionDetail(session) {
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
-  session.firstTs = session.rolloutFirstTs || session.firstTs;
-  session.lastTs = session.rolloutLastTs || session.lastTs;
+  if (session.rolloutFirstTs
+      && new Date(session.rolloutFirstTs).getTime()
+        < (session.firstTs ? new Date(session.firstTs).getTime() : Infinity)) {
+    session.firstTs = session.rolloutFirstTs;
+  }
+  if (session.rolloutLastTs
+      && new Date(session.rolloutLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
+    session.lastTs = session.rolloutLastTs;
+  }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
   if (userMessages.length > 0) session.topic = trimTopic(userMessages[0]) || session.topic;
@@ -1064,7 +1093,10 @@ function applySessionSearchData(session, searchData) {
   const previousLastTs = session.lastTs;
   session.searchText = (searchData && searchData.searchText) || '';
   session.estimatedMessages = (searchData && searchData.estimatedMessages) || 0;
-  if (searchData && searchData.lastTs) session.lastTs = searchData.lastTs;
+  if (searchData && searchData.lastTs) {
+    session.lastTs = searchData.lastTs;
+    session._rolloutFileLastTs = searchData.lastTs;
+  }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   if (session._topicPending) {
     session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
