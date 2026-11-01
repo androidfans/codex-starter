@@ -30,6 +30,7 @@ const {
   isInteractiveSession,
   loadAllSessions,
   attachSessionRolloutFiles,
+  refreshAttachedRolloutBounds,
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
@@ -516,8 +517,12 @@ describe('session parsing', () => {
       assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
       assert.equal(fragments[0].duration, '10m');
 
+      fragments[1]._rolloutFileLastTs = '2026-04-12T01:00:00.000Z';
+      refreshAttachedRolloutBounds(fragments[1]);
+      assert.equal(fragments[0].lastTs, '2026-04-12T01:00:00.000Z',
+        'loaded details receive bounds discovered while another fragment is indexed');
+
       fragments[0]._detailLoaded = false;
-      fragments[0].lastTs = '2026-04-12T01:00:00.000Z';
       loadSessionDetail(fragments[0]);
       assert.equal(fragments[0].lastTs, '2026-04-12T01:00:00.000Z',
         'detail loading preserves a fresher timestamp found by background indexing');
@@ -590,6 +595,46 @@ describe('session parsing', () => {
       assert.deepEqual(session.assistantSnippets, ['same answer', 'same answer']);
     } finally {
       fs.unlinkSync(filePath);
+    }
+  });
+
+  it('deduplicates local mirrored records before cross-rollout ordering', () => {
+    const firstPath = writeSession('2026/04/09/rollout-2026-04-09T01-00-00-mirrored-order.jsonl', [
+      {
+        timestamp: '2026-04-09T01:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'mirrored prompt' }],
+        },
+      },
+      {
+        timestamp: '2026-04-09T01:10:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'mirrored prompt' },
+      },
+    ]);
+    const secondPath = writeSession('2026/04/09/rollout-2026-04-09T01-05-00-middle.jsonl', [
+      {
+        timestamp: '2026-04-09T01:05:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'middle prompt' },
+      },
+    ]);
+    const session = {
+      sessionId: 'mirrored-order',
+      filePath: secondPath,
+      rolloutFilePaths: [firstPath, secondPath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['middle prompt', 'mirrored prompt']);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(secondPath);
     }
   });
 

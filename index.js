@@ -698,6 +698,16 @@ function refreshAttachedRolloutBounds(session) {
   for (const rollout of rollouts) {
     if (firstTs) rollout.rolloutFirstTs = firstTs;
     if (lastTs) rollout.rolloutLastTs = lastTs;
+    if (rollout._detailLoaded) {
+      if (firstTs && new Date(firstTs).getTime()
+          < (rollout.firstTs ? new Date(rollout.firstTs).getTime() : Infinity)) {
+        rollout.firstTs = firstTs;
+      }
+      if (lastTs && new Date(lastTs).getTime() > new Date(rollout.lastTs || 0).getTime()) {
+        rollout.lastTs = lastTs;
+      }
+      rollout.duration = formatDuration(rollout.firstTs, rollout.lastTs);
+    }
   }
 }
 
@@ -882,14 +892,28 @@ function loadSessionDetail(session) {
         const isTurnBoundary = entry.type === 'event_msg'
           && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
         if (message || isTurnBoundary) {
-          fileRecords.push({
+          const record = {
             message,
             isTurnBoundary,
             timestamp: timestamp || '',
             timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
             fileIndex,
             lineIndex,
-          });
+          };
+          const previous = fileRecords.at(-1);
+          const isMirroredPair = message && previous?.message
+            && previous.message.role === message.role
+            && previous.message.text === message.text
+            && previous.message.phase === message.phase
+            && previous.message.recordType !== message.recordType
+            && [previous.message.recordType, message.recordType].every(type => (
+              type === 'event_msg' || type === 'response_item'
+            ));
+          if (isMirroredPair) {
+            if (message.recordType === 'event_msg') fileRecords[fileRecords.length - 1] = record;
+          } else {
+            fileRecords.push(record);
+          }
         }
 
         if (entry.type === 'response_item') {
@@ -3283,6 +3307,7 @@ if (typeof module !== 'undefined') {
     isInteractiveSession,
     loadAllSessions,
     attachSessionRolloutFiles,
+    refreshAttachedRolloutBounds,
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,
