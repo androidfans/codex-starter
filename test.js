@@ -422,7 +422,6 @@ describe('session parsing', () => {
         },
       },
       {
-        timestamp: '2026-04-10T01:00:01.000Z',
         type: 'event_msg',
         payload: { type: 'user_message', message: 'original request' },
       },
@@ -435,6 +434,7 @@ describe('session parsing', () => {
         type: 'event_msg',
         payload: { type: 'user_message', message: 'late original follow-up' },
       },
+      { type: 'custom-title', customTitle: '' },
     ]);
     const continuedPath = writeSession('2026/04/11/rollout-2026-04-11T01-00-00-sess-resumed.jsonl', [
       {
@@ -450,6 +450,10 @@ describe('session parsing', () => {
       },
       {
         type: 'event_msg',
+        payload: { type: 'user_message', message: 'original request' },
+      },
+      {
+        type: 'event_msg',
         payload: { type: 'agent_message', message: 'first response' },
       },
       {
@@ -462,6 +466,7 @@ describe('session parsing', () => {
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'continued response' },
       },
+      { type: 'custom-title', customTitle: 'stale title' },
     ]);
 
     try {
@@ -492,9 +497,36 @@ describe('session parsing', () => {
       assert.deepEqual(fragments[0].assistantSnippets, ['first response', 'continued response']);
       assert.equal(fragments[0].topic, 'original request');
       assert.equal(fragments[0].totalMessages, 5);
+      assert.equal(fragments[0].customTitle, '');
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuedPath);
+    }
+  });
+
+  it('preserves a legitimate repeated first turn in a timestamp-less resume', () => {
+    const firstPath = writeSession('2026/04/08/rollout-2026-04-08T01-00-00-repeat.jsonl', [
+      { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'old answer' } },
+    ]);
+    const resumedPath = writeSession('2026/04/09/rollout-2026-04-09T01-00-00-repeat.jsonl', [
+      { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'new answer' } },
+    ]);
+    const session = {
+      sessionId: 'repeat',
+      filePath: resumedPath,
+      rolloutFilePaths: [firstPath, resumedPath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['retry', 'retry']);
+      assert.deepEqual(session.assistantSnippets, ['old answer', 'new answer']);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(resumedPath);
     }
   });
 

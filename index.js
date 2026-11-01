@@ -801,7 +801,13 @@ function loadSessionDetail(session) {
     for (let index = pattern.length + 1; index < prefix.length; index++) {
       maximum = Math.max(maximum, prefix[index]);
     }
-    return Math.min(pattern.length, maximum);
+    const overlap = Math.min(pattern.length, maximum);
+    const replay = next.slice(0, overlap);
+    const hasUserAndAssistant = replay.some(record => record.message?.role === 'user')
+      && replay.some(record => record.message?.role === 'assistant');
+    // A single repeated prompt can be a legitimate new turn. Only remove a
+    // multi-record exchange, which is strong evidence of copied history.
+    return overlap >= 2 && hasUserAndAssistant ? overlap : 0;
   }
 
   function fileNameTimestamp(filePath) {
@@ -863,18 +869,14 @@ function loadSessionDetail(session) {
           if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
         }
         const titleUpdate = getCustomTitleUpdate(entry);
-        if (titleUpdate !== null) session.customTitle = titleUpdate;
+        if (filePath === session.filePath && titleUpdate !== null) {
+          session.customTitle = titleUpdate;
+        }
       } catch (_) { /* ignore */ }
       lineIndex++;
     });
 
     const fallbackTime = Number.isFinite(fileAnchorTime) ? fileAnchorTime : fileIndex;
-    const nextTimestamp = new Array(fileRecords.length).fill(null);
-    let followingTime = null;
-    for (let index = fileRecords.length - 1; index >= 0; index--) {
-      nextTimestamp[index] = followingTime;
-      if (fileRecords[index].timestampMs !== null) followingTime = fileRecords[index].timestampMs;
-    }
     let precedingTime = null;
     for (let index = 0; index < fileRecords.length; index++) {
       const record = fileRecords[index];
@@ -882,9 +884,9 @@ function loadSessionDetail(session) {
         record.sortTime = record.timestampMs;
         precedingTime = record.timestampMs;
       } else {
-        // Tie timestamp-less legacy records to their nearest timed neighbor;
-        // file/line tie-breakers below preserve their local source order.
-        record.sortTime = precedingTime ?? nextTimestamp[index] ?? fallbackTime;
+        // Tie timestamp-less legacy records to the preceding event or rollout
+        // start; file/line tie-breakers below preserve local source order.
+        record.sortTime = precedingTime ?? fallbackTime;
       }
     }
 
