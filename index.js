@@ -668,9 +668,6 @@ function attachSessionRolloutFiles(sessions) {
         new Date(b._rolloutFileLastTs).getTime() - new Date(a._rolloutFileLastTs).getTime()
       ))[0]?._rolloutFileLastTs
       || session.lastTs;
-    session.firstTs = session.rolloutFirstTs;
-    session.lastTs = session.rolloutLastTs;
-    session.duration = formatDuration(session.firstTs, session.lastTs);
     if (pathsChanged && session._detailLoaded) {
       session._detailLoaded = false;
       delete session.userMessages;
