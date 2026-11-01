@@ -429,11 +429,13 @@ function forEachLineSync(filePath, callback) {
     while (true) {
       const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
+      let searchFrom = pending.length;
       pending += decoder.write(buffer.subarray(0, bytesRead));
       let newlineIndex;
-      while ((newlineIndex = pending.indexOf('\n')) !== -1) {
+      while ((newlineIndex = pending.indexOf('\n', searchFrom)) !== -1) {
         const line = pending.substring(0, newlineIndex);
         pending = pending.substring(newlineIndex + 1);
+        searchFrom = 0;
         if (line.trim()) callback(line);
       }
     }
@@ -635,16 +637,25 @@ function walkSessionFiles(dir) {
 }
 
 function attachSessionRolloutFiles(sessions) {
-  const pathsBySessionId = new Map();
+  const rolloutsBySessionId = new Map();
   for (const session of sessions) {
     if (!session.sessionId || !session.filePath) continue;
-    if (!pathsBySessionId.has(session.sessionId)) pathsBySessionId.set(session.sessionId, []);
-    pathsBySessionId.get(session.sessionId).push(session.filePath);
+    if (!rolloutsBySessionId.has(session.sessionId)) rolloutsBySessionId.set(session.sessionId, []);
+    rolloutsBySessionId.get(session.sessionId).push(session);
   }
 
   for (const session of sessions) {
-    const filePaths = pathsBySessionId.get(session.sessionId) || [session.filePath];
-    session.rolloutFilePaths = [...new Set(filePaths)].sort((a, b) => a.localeCompare(b));
+    const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
+    session.rolloutFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
+      .sort((a, b) => a.localeCompare(b));
+    session.rolloutFirstTs = rollouts
+      .filter(rollout => rollout.firstTs)
+      .sort((a, b) => new Date(a.firstTs).getTime() - new Date(b.firstTs).getTime())[0]?.firstTs
+      || session.firstTs;
+    session.rolloutLastTs = rollouts
+      .filter(rollout => rollout.lastTs)
+      .sort((a, b) => new Date(b.lastTs).getTime() - new Date(a.lastTs).getTime())[0]?.lastTs
+      || session.lastTs;
   }
   return sessions;
 }
@@ -815,6 +826,8 @@ function loadSessionDetail(session) {
       /rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/,
     );
     if (!match) return NaN;
+    // Codex rollout filenames use the machine's local wall-clock time (the
+    // JSONL entry timestamps are UTC), so intentionally parse this without Z.
     return new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`).getTime();
   }
 
@@ -928,6 +941,9 @@ function loadSessionDetail(session) {
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
+  session.firstTs = session.rolloutFirstTs || session.firstTs;
+  session.lastTs = session.rolloutLastTs || session.lastTs;
+  session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
   if (userMessages.length > 0) session.topic = trimTopic(userMessages[0]) || session.topic;
   return session;

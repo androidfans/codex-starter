@@ -442,7 +442,7 @@ describe('session parsing', () => {
         type: 'session_meta',
         payload: {
           id: 'sess-resumed',
-          timestamp: '2026-04-10T01:00:00.000Z',
+          timestamp: '2026-04-11T01:00:00.000Z',
           cwd: '/Users/test/Desktop/project-resumed',
           source: 'cli',
           originator: 'codex-tui',
@@ -476,6 +476,8 @@ describe('session parsing', () => {
       assert.equal(fragments[0].filePath, firstPath,
         'the fragment with the latest activity remains representative');
       assert.deepEqual(fragments[0].rolloutFilePaths, [firstPath, continuedPath]);
+      assert.equal(fragments[0].rolloutFirstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(fragments[0].rolloutLastTs, '2026-04-10T01:10:00.000Z');
 
       const originalReadFileSync = fs.readFileSync;
       fs.readFileSync = function(target, ...args) {
@@ -498,6 +500,8 @@ describe('session parsing', () => {
       assert.equal(fragments[0].topic, 'original request');
       assert.equal(fragments[0].totalMessages, 5);
       assert.equal(fragments[0].customTitle, '');
+      assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(fragments[0].duration, '10m');
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuedPath);
