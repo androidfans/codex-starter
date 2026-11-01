@@ -650,6 +650,7 @@ function attachSessionRolloutFiles(sessions) {
 
   for (const session of sessions) {
     const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
+    session._rolloutGroup = rollouts;
     const previousFilePaths = session.rolloutFilePaths || [session.filePath];
     const nextFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
       .sort((a, b) => a.localeCompare(b));
@@ -682,6 +683,22 @@ function attachSessionRolloutFiles(sessions) {
     }
   }
   return sessions;
+}
+
+function refreshAttachedRolloutBounds(session) {
+  const rollouts = session._rolloutGroup || [session];
+  const firstTs = rollouts
+    .map(rollout => rollout._rolloutFileFirstTs)
+    .filter(Boolean)
+    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
+  const lastTs = rollouts
+    .map(rollout => rollout._rolloutFileLastTs)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  for (const rollout of rollouts) {
+    if (firstTs) rollout.rolloutFirstTs = firstTs;
+    if (lastTs) rollout.rolloutLastTs = lastTs;
+  }
 }
 
 function loadSessionQuick(filePath, options = {}) {
@@ -2470,8 +2487,9 @@ function createApp({
         attachSessionRolloutFiles(allSessions);
       }
       refreshUniqueProjects();
+    } else {
+      refreshAttachedRolloutBounds(session);
     }
-    attachSessionRolloutFiles(allSessions);
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
     const activeSortChanged = (sortMode === 'messages' && session._messageCountChangedDuringIndex)
