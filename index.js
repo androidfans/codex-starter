@@ -128,6 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
+const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
 
 function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
@@ -144,9 +145,9 @@ function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
   }
 }
 
-function loadCodexThreadNames({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
+function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
   const databasePath = findLatestCodexStateDatabase(codexDir);
-  if (!databasePath) return new Map();
+  if (!databasePath) return { ok: true, names: new Map() };
 
   try {
     const result = runCommand('sqlite3', [
@@ -157,20 +158,26 @@ function loadCodexThreadNames({ codexDir = CODEX_DIR, runCommand = spawnSync } =
     ], {
       encoding: 'utf-8',
       maxBuffer: 16 * 1024 * 1024,
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-    if (result.error || result.status !== 0) return new Map();
+    if (result.error || result.status !== 0) {
+      return { ok: false, names: new Map() };
+    }
 
     const rows = JSON.parse(String(result.stdout || '[]') || '[]');
-    return new Map(rows
+    return { ok: true, names: new Map(rows
       .filter(row => row && typeof row.id === 'string' && typeof row.name === 'string')
       .map(row => [row.id, row.name.trim()])
-      .filter(([, name]) => name));
+      .filter(([, name]) => name)) };
   } catch (_) {
     // AI titles are an optional enhancement. Older Codex versions and Linux
     // systems without the sqlite3 CLI continue to use the first user message.
-    return new Map();
+    return { ok: false, names: new Map() };
   }
+}
+
+function loadCodexThreadNames(options = {}) {
+  return loadCodexThreadNamesResult(options).names;
 }
 
 function applyCodexThreadNames(sessions, threadNames = loadCodexThreadNames()) {
@@ -412,6 +419,33 @@ function readTailText(filePath, bytes = 16 * 1024) {
   return buffer.toString('utf-8');
 }
 
+function forEachLineSync(filePath, callback) {
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  const decoder = new StringDecoder('utf8');
+  let pending = '';
+
+  try {
+    while (true) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead === 0) break;
+      let searchFrom = pending.length;
+      pending += decoder.write(buffer.subarray(0, bytesRead));
+      let newlineIndex;
+      while ((newlineIndex = pending.indexOf('\n', searchFrom)) !== -1) {
+        const line = pending.substring(0, newlineIndex);
+        pending = pending.substring(newlineIndex + 1);
+        searchFrom = 0;
+        if (line.trim()) callback(line);
+      }
+    }
+    pending += decoder.end();
+    if (pending.trim()) callback(pending);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function extractTextParts(content) {
   if (typeof content === 'string') return [content];
   if (!Array.isArray(content)) return [];
@@ -602,6 +636,81 @@ function walkSessionFiles(dir) {
   return results;
 }
 
+function attachSessionRolloutFiles(sessions) {
+  const rolloutsBySessionId = new Map();
+  for (const session of sessions) {
+    if (!session.sessionId || !session.filePath) continue;
+    if (!Object.hasOwn(session, '_rolloutFileFirstTs')) {
+      session._rolloutFileFirstTs = session.firstTs;
+      session._rolloutFileLastTs = session.lastTs;
+    }
+    if (!rolloutsBySessionId.has(session.sessionId)) rolloutsBySessionId.set(session.sessionId, []);
+    rolloutsBySessionId.get(session.sessionId).push(session);
+  }
+
+  for (const session of sessions) {
+    const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
+    session._rolloutGroup = rollouts;
+    const previousFilePaths = session.rolloutFilePaths || [session.filePath];
+    const nextFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
+      .sort((a, b) => a.localeCompare(b));
+    const pathsChanged = previousFilePaths.length !== nextFilePaths.length
+      || previousFilePaths.some((filePath, index) => filePath !== nextFilePaths[index]);
+    session.rolloutFilePaths = nextFilePaths;
+    session.rolloutFirstTs = rollouts
+      .filter(rollout => rollout._rolloutFileFirstTs)
+      .sort((a, b) => (
+        new Date(a._rolloutFileFirstTs).getTime() - new Date(b._rolloutFileFirstTs).getTime()
+      ))[0]?._rolloutFileFirstTs
+      || session.firstTs;
+    session.rolloutLastTs = rollouts
+      .filter(rollout => rollout._rolloutFileLastTs)
+      .sort((a, b) => (
+        new Date(b._rolloutFileLastTs).getTime() - new Date(a._rolloutFileLastTs).getTime()
+      ))[0]?._rolloutFileLastTs
+      || session.lastTs;
+    if (pathsChanged) {
+      session.firstTs = session._rolloutFileFirstTs;
+      session.lastTs = session._rolloutFileLastTs;
+      session.duration = formatDuration(session.firstTs, session.lastTs);
+      if (session._detailLoaded) {
+        session._detailLoaded = false;
+        delete session.userMessages;
+        delete session.assistantSnippets;
+        delete session.totalMessages;
+        delete session.toolsUsed;
+      }
+    }
+  }
+  return sessions;
+}
+
+function refreshAttachedRolloutBounds(session) {
+  const rollouts = session._rolloutGroup || [session];
+  const firstTs = rollouts
+    .map(rollout => rollout._rolloutFileFirstTs)
+    .filter(Boolean)
+    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
+  const lastTs = rollouts
+    .map(rollout => rollout._rolloutFileLastTs)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  for (const rollout of rollouts) {
+    if (firstTs) rollout.rolloutFirstTs = firstTs;
+    if (lastTs) rollout.rolloutLastTs = lastTs;
+    if (rollout._detailLoaded) {
+      if (firstTs && new Date(firstTs).getTime()
+          < (rollout.firstTs ? new Date(rollout.firstTs).getTime() : Infinity)) {
+        rollout.firstTs = firstTs;
+      }
+      if (lastTs && new Date(lastTs).getTime() > new Date(rollout.lastTs || 0).getTime()) {
+        rollout.lastTs = lastTs;
+      }
+      rollout.duration = formatDuration(rollout.firstTs, rollout.lastTs);
+    }
+  }
+}
+
 function loadSessionQuick(filePath, options = {}) {
   const stat = options.stat || fs.statSync(filePath);
   const sessionLabel = path.basename(filePath, '.jsonl');
@@ -720,43 +829,142 @@ function loadSessionQuick(filePath, options = {}) {
 
 function loadSessionDetail(session) {
   if (session._detailLoaded) return session;
-  const lines = fs.readFileSync(session.filePath, 'utf-8').split('\n').filter(Boolean);
-
   const conversationMessages = [];
+  const sourceOrderedRecords = [];
+  const timestampedRecordSources = new Map();
   const toolsUsed = new Set();
+  const filePaths = (session.rolloutFilePaths || [session.filePath])
+    .filter(filePath => filePath && fs.existsSync(filePath))
+    .sort((a, b) => a.localeCompare(b));
   let canonicalMetaLoaded = false;
 
-  for (const line of lines) {
-    try {
-      const entry = JSON.parse(line);
-      // Fork rollouts contain inherited session_meta records from their
-      // ancestors. Only the first record describes this file's canonical
-      // thread; applying later records would replace the child UUID with a
-      // parent UUID.
-      if (entry.type === 'session_meta' && !canonicalMetaLoaded) {
-        canonicalMetaLoaded = true;
-        const payload = entry.payload || {};
-        session.sessionId = payload.id || session.sessionId;
-        session.firstTs = payload.timestamp || session.firstTs;
-        session.cwd = payload.cwd || session.cwd;
-        session.project = getProjectDisplayName(session.cwd);
-        session.version = payload.cli_version || session.version;
-        session.modelProvider = payload.model_provider || session.modelProvider;
-        session.source = payload.source || session.source;
-        session.originator = payload.originator || session.originator;
-        session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
-        session.threadSource = payload.thread_source || session.threadSource || '';
-      }
+  function recordKey(record) {
+    const body = record.isTurnBoundary
+      ? 'turn-boundary'
+      : [record.message.role, record.message.phase, record.message.text].join('\0');
+    return record.timestamp ? `${record.timestamp}\0${body}` : body;
+  }
 
-      appendConversationEntry(conversationMessages, entry);
+  function fileNameTimestamp(filePath) {
+    const match = path.basename(filePath).match(
+      /rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/,
+    );
+    if (!match) return NaN;
+    // Codex rollout filenames use the machine's local wall-clock time (the
+    // JSONL entry timestamps are UTC), so intentionally parse this without Z.
+    return new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`).getTime();
+  }
 
-      if (entry.type === 'response_item') {
+  filePaths.forEach((filePath, fileIndex) => {
+    const fileRecords = [];
+    let fileAnchorTime = fileNameTimestamp(filePath);
+    let lineIndex = 0;
+    forEachLineSync(filePath, (line) => {
+      try {
+        const entry = JSON.parse(line);
+        const timestamp = getEntryTimestamp(entry);
+        const timestampMs = timestamp ? new Date(timestamp).getTime() : NaN;
+        if (!Number.isFinite(fileAnchorTime) && Number.isFinite(timestampMs)) {
+          fileAnchorTime = timestampMs;
+        }
+        // Fork rollouts contain inherited session_meta records from their
+        // ancestors. Only metadata from the selected physical rollout should
+        // update the representative session; other same-id files contribute
+        // conversation history only.
+        if (filePath === session.filePath
+            && entry.type === 'session_meta' && !canonicalMetaLoaded) {
+          canonicalMetaLoaded = true;
+          const payload = entry.payload || {};
+          session.sessionId = payload.id || session.sessionId;
+          session.firstTs = payload.timestamp || session.firstTs;
+          session.cwd = payload.cwd || session.cwd;
+          session.project = getProjectDisplayName(session.cwd);
+          session.version = payload.cli_version || session.version;
+          session.modelProvider = payload.model_provider || session.modelProvider;
+          session.source = payload.source || session.source;
+          session.originator = payload.originator || session.originator;
+          session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+          session.threadSource = payload.thread_source || session.threadSource || '';
+        }
+
+        const message = getConversationMessage(entry);
         const payload = entry.payload || {};
-        if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
+        const isTurnBoundary = entry.type === 'event_msg'
+          && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
+        if (message || isTurnBoundary) {
+          const record = {
+            message,
+            isTurnBoundary,
+            timestamp: timestamp || '',
+            timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+            fileIndex,
+            lineIndex,
+          };
+          const previous = fileRecords.at(-1);
+          const isMirroredPair = message && previous?.message
+            && previous.message.role === message.role
+            && previous.message.text === message.text
+            && previous.message.phase === message.phase
+            && previous.message.recordType !== message.recordType
+            && [previous.message.recordType, message.recordType].every(type => (
+              type === 'event_msg' || type === 'response_item'
+            ));
+          if (isMirroredPair) {
+            if (message.recordType === 'event_msg') fileRecords[fileRecords.length - 1] = record;
+          } else {
+            fileRecords.push(record);
+          }
+        }
+
+        if (entry.type === 'response_item') {
+          if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
+        }
+        const titleUpdate = getCustomTitleUpdate(entry);
+        if (filePath === session.filePath && titleUpdate !== null) {
+          session.customTitle = titleUpdate;
+        }
+      } catch (_) { /* ignore */ }
+      lineIndex++;
+    });
+
+    const fallbackTime = Number.isFinite(fileAnchorTime) ? fileAnchorTime : fileIndex;
+    let precedingTime = null;
+    for (let index = 0; index < fileRecords.length; index++) {
+      const record = fileRecords[index];
+      if (record.timestampMs !== null) {
+        record.sortTime = record.timestampMs;
+        precedingTime = record.timestampMs;
+      } else {
+        // Tie timestamp-less legacy records to the preceding event or rollout
+        // start; file/line tie-breakers below preserve local source order.
+        record.sortTime = precedingTime ?? fallbackTime;
       }
-      const titleUpdate = getCustomTitleUpdate(entry);
-      if (titleUpdate !== null) session.customTitle = titleUpdate;
-    } catch (_) { /* ignore */ }
+    }
+
+    for (const record of fileRecords) {
+      // Content equality cannot distinguish a timestamp-less history replay
+      // from an intentional retry, so preserve it rather than lose a turn.
+      const key = record.timestamp ? recordKey(record) : '';
+      if (key && timestampedRecordSources.has(key)
+          && timestampedRecordSources.get(key) !== record.fileIndex) continue;
+      if (key && !timestampedRecordSources.has(key)) {
+        timestampedRecordSources.set(key, record.fileIndex);
+      }
+      sourceOrderedRecords.push(record);
+    }
+  });
+
+  sourceOrderedRecords.sort((a, b) => a.sortTime - b.sortTime
+    || a.fileIndex - b.fileIndex
+    || a.lineIndex - b.lineIndex);
+  for (const record of sourceOrderedRecords) {
+    if (record.isTurnBoundary) {
+      if (!conversationMessages.at(-1)?.isTurnBoundary) {
+        conversationMessages.push({ isTurnBoundary: true });
+      }
+    } else {
+      appendConversationMessage(conversationMessages, record.message);
+    }
   }
 
   const userMessages = conversationMessages
@@ -772,6 +980,16 @@ function loadSessionDetail(session) {
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
+  if (session.rolloutFirstTs
+      && new Date(session.rolloutFirstTs).getTime()
+        < (session.firstTs ? new Date(session.firstTs).getTime() : Infinity)) {
+    session.firstTs = session.rolloutFirstTs;
+  }
+  if (session.rolloutLastTs
+      && new Date(session.rolloutLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
+    session.lastTs = session.rolloutLastTs;
+  }
+  session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
   if (userMessages.length > 0) session.topic = trimTopic(userMessages[0]) || session.topic;
   return session;
@@ -921,7 +1139,10 @@ function applySessionSearchData(session, searchData) {
   const previousLastTs = session.lastTs;
   session.searchText = (searchData && searchData.searchText) || '';
   session.estimatedMessages = (searchData && searchData.estimatedMessages) || 0;
-  if (searchData && searchData.lastTs) session.lastTs = searchData.lastTs;
+  if (searchData && searchData.lastTs) {
+    session.lastTs = searchData.lastTs;
+    session._rolloutFileLastTs = searchData.lastTs;
+  }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   if (session._topicPending) {
     session.topic = trimTopic(searchData && searchData.firstUserMessage) || '(no user messages)';
@@ -948,8 +1169,11 @@ async function resolvePendingSessionSummaries(sessions) {
       session._searchIndexError = error;
     }
     updateSessionCacheRecord(sessions, session);
-    if (session._excludeFromList) sessions.splice(sessions.indexOf(session), 1);
+    if (session._excludeFromList) {
+      sessions.splice(sessions.indexOf(session), 1);
+    }
   }
+  attachSessionRolloutFiles(sessions);
   flushSessionCache(sessions);
 }
 
@@ -979,6 +1203,9 @@ function serializeSessionForCache(session) {
   for (const field of fields) {
     if (session[field] !== undefined) cached[field] = session[field];
   }
+  if (session._rolloutFileFirstTs !== undefined) cached.firstTs = session._rolloutFileFirstTs;
+  if (session._rolloutFileLastTs !== undefined) cached.lastTs = session._rolloutFileLastTs;
+  cached.duration = formatDuration(cached.firstTs, cached.lastTs);
   cached.topicPending = Boolean(session._topicPending);
   cached.searchIndexed = Boolean(session._searchIndexed);
   return cached;
@@ -1101,6 +1328,7 @@ function loadAllSessions(options = {}) {
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  attachSessionRolloutFiles(sessions);
   applyCodexThreadNames(
     sessions,
     options.threadNames === undefined ? loadCodexThreadNames() : options.threadNames,
@@ -1565,8 +1793,13 @@ async function runListMode(limit) {
 
 // ─── TUI Application ────────────────────────────────────────────────────────
 
-function createApp({ activateInputSource = createInputSourceActivator() } = {}) {
-  const allSessions = loadAllSessions();
+function createApp({
+  activateInputSource = createInputSourceActivator(),
+  readThreadNames = loadCodexThreadNamesResult,
+  threadNameRetryDelays = THREAD_NAME_RETRY_DELAYS_MS,
+} = {}) {
+  const initialThreadNames = readThreadNames();
+  const allSessions = loadAllSessions({ threadNames: initialThreadNames.names });
   const meta = loadMeta();
 
   // Apply meta customTitles — these take priority over JSONL titles
@@ -1593,6 +1826,8 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   let pendingIndexRefresh = false;
   let summaryRefreshPending = false;
   let indexRefreshTimer = null;
+  let threadNameRetryTimer = null;
+  let threadNameRetryIndex = 0;
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
@@ -2221,6 +2456,36 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     renderAll();
   }
 
+  function scheduleThreadNameRetry() {
+    if (initialThreadNames.ok || threadNameRetryIndex >= threadNameRetryDelays.length) return;
+    const delay = threadNameRetryDelays[threadNameRetryIndex++];
+    threadNameRetryTimer = setTimeout(() => {
+      threadNameRetryTimer = null;
+      const result = readThreadNames();
+      if (!result.ok) {
+        scheduleThreadNameRetry();
+        return;
+      }
+
+      const changed = allSessions.some(session => (
+        session.aiTitle !== (result.names.get(session.sessionId) || '')
+      ));
+      applyCodexThreadNames(allSessions, result.names);
+      if (!changed) return;
+      if (popupOpen || renameMode) {
+        pendingIndexRefresh = true;
+      } else {
+        applyFilter({ preserveSelection: true });
+      }
+    }, delay);
+  }
+
+  function cancelThreadNameRetry() {
+    if (!threadNameRetryTimer) return;
+    clearTimeout(threadNameRetryTimer);
+    threadNameRetryTimer = null;
+  }
+
   function applyPendingIndexRefresh() {
     if (!pendingIndexRefresh || popupOpen || renameMode) return false;
     pendingIndexRefresh = false;
@@ -2241,8 +2506,13 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
     updateSessionCacheRecord(allSessions, session);
     if (session._excludeFromList) {
       const index = allSessions.indexOf(session);
-      if (index !== -1) allSessions.splice(index, 1);
+      if (index !== -1) {
+        allSessions.splice(index, 1);
+        attachSessionRolloutFiles(allSessions);
+      }
       refreshUniqueProjects();
+    } else {
+      refreshAttachedRolloutBounds(session);
     }
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
@@ -2576,6 +2846,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
   function resumeSession(session, overrideModeId = null) {
     cancelSearchIndexing();
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -2603,6 +2874,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
 
   function startNewSession(overrideModeId = null) {
     cancelSearchIndexing();
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
 
@@ -2713,6 +2985,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
+      attachSessionRolloutFiles(allSessions);
       reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
       saveMeta(meta);
       flushSessionCache(allSessions);
@@ -2919,6 +3192,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   screen.key(['p'], () => { if (!renameMode && !isSearchMode && !popupOpen) showProjectPicker(); });
   function quitApp() {
     cancelSearchIndexing();
+    cancelThreadNameRetry();
     process.stdout.write('\x1b[0m');
     screen.destroy();
     process.exit(0);
@@ -2978,6 +3252,7 @@ function createApp({ activateInputSource = createInputSourceActivator() } = {}) 
   // ─── Go! ───────────────────────────────────────────────────────────────
   renderAll();
   listPanel.focus();
+  scheduleThreadNameRetry();
   const sessionsToIndex = allSessions.filter(session => !session._searchIndexed);
   const cancelBackgroundIndexing = indexSessionsInBackground(sessionsToIndex, {
     onSessionIndexed: scheduleIndexRefresh,
@@ -3020,6 +3295,7 @@ if (typeof module !== 'undefined') {
     loadSessionQuick,
     loadSessionDetail,
     findLatestCodexStateDatabase,
+    loadCodexThreadNamesResult,
     loadCodexThreadNames,
     applyCodexThreadNames,
     getSessionDisplayTitle,
@@ -3030,6 +3306,8 @@ if (typeof module !== 'undefined') {
     flushSessionCache,
     isInteractiveSession,
     loadAllSessions,
+    attachSessionRolloutFiles,
+    refreshAttachedRolloutBounds,
     filterSessionList,
     buildSessionFamilies,
     buildVisibleSessionRows,

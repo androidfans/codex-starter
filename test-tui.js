@@ -334,6 +334,16 @@ childProcess.spawn = function(cmd, args, opts) {
 };
 
 const mod = require('./index.js');
+let threadNameReadCount = 0;
+
+function readThreadNamesWithTransientFailure() {
+  threadNameReadCount++;
+  if (threadNameReadCount === 1) return { ok: false, names: new Map() };
+  return {
+    ok: true,
+    names: new Map([['sess-a-fork-latest', 'generated-latest-title']]),
+  };
+}
 
 function triggerScreenKey(keyName, ch = null) {
   const handlers = screenKeyHandlers[keyName] || [];
@@ -359,6 +369,8 @@ function detailText() {
 before(async () => {
   mod.createApp({
     activateInputSource: () => { inputSourceActivationCount++; },
+    readThreadNames: readThreadNamesWithTransientFailure,
+    threadNameRetryDelays: [0],
   });
   assert.match(widgets.header.getContent(), /indexing search/);
   // Initial render happens synchronously; search indexing starts on the next
@@ -368,6 +380,7 @@ before(async () => {
     await new Promise(resolve => setTimeout(resolve, 10));
   }
   assert.doesNotMatch(widgets.header.getContent(), /indexing search/);
+  assert.equal(threadNameReadCount, 2);
 });
 
 after(() => {
@@ -398,11 +411,15 @@ describe('codex starter tui', () => {
     assert.match(widgets.header.getContent(), /conversations · 3 versions/);
     const plainHeader = widgets.header.getContent().replace(/{(\/?)?[\w\-,;!#]*}/g, '');
     assert.match(plainHeader, /1 projects/);
-    assert.ok(widgets.list.items.some(item => item.includes('build proj')));
+    assert.ok(widgets.list.items.some(item => item.includes('generated-latest-title')));
     assert.ok(widgets.list.items.some(item => item.includes('▸')));
     assert.ok(widgets.list.items.some(item => item.includes('Fork × 2')));
     assert.ok(!widgets.list.items.some(item => item.includes('investigate failing tests')));
     assert.ok(!widgets.list.items.some(item => item.includes('project-empty')));
+  });
+
+  it('refreshes AI titles after a transient startup read failure', () => {
+    assert.ok(widgets.list.items.some(item => item.includes('generated-latest-title')));
   });
 
   it('persists completed search indexes for warm startup', () => {

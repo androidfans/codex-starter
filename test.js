@@ -18,6 +18,7 @@ const {
   loadSessionQuick,
   loadSessionDetail,
   findLatestCodexStateDatabase,
+  loadCodexThreadNamesResult,
   loadCodexThreadNames,
   applyCodexThreadNames,
   getSessionDisplayTitle,
@@ -28,6 +29,8 @@ const {
   flushSessionCache,
   isInteractiveSession,
   loadAllSessions,
+  attachSessionRolloutFiles,
+  refreshAttachedRolloutBounds,
   filterSessionList,
   buildSessionFamilies,
   buildVisibleSessionRows,
@@ -158,12 +161,37 @@ describe('helpers', () => {
 
     assert.equal(findLatestCodexStateDatabase(), newestDatabase);
     assert.equal(calls[0].command, 'sqlite3');
-    assert.equal(calls[0].args[2], newestDatabase);
+    assert.ok(calls[0].args.includes(newestDatabase));
+    assert.deepEqual(calls[0].args.slice(0, 2), ['-readonly', '-json']);
+    assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal(names.get('thread-a'), 'Fix login redirect');
     assert.equal(names.has('thread-empty'), false);
 
     fs.unlinkSync(olderDatabase);
     fs.unlinkSync(newestDatabase);
+  });
+
+  it('distinguishes a failed AI-title query from a valid empty result', () => {
+    const database = path.join(CODEX_DIR, 'state_5.sqlite');
+    fs.writeFileSync(database, '');
+
+    const failed = loadCodexThreadNamesResult({
+      runCommand() {
+        return { status: 5, stderr: 'database is locked', stdout: '' };
+      },
+    });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.names.size, 0);
+
+    const empty = loadCodexThreadNamesResult({
+      runCommand() {
+        return { status: 0, stdout: '[]' };
+      },
+    });
+    assert.equal(empty.ok, true);
+    assert.equal(empty.names.size, 0);
+
+    fs.unlinkSync(database);
   });
 
   it('prefers manual titles, then Codex AI titles, then the first prompt', () => {
@@ -380,6 +408,234 @@ describe('session parsing', () => {
     assert.deepEqual(session.toolsUsed, ['exec_command']);
     assert.equal(session.totalMessages, 2);
     assert.equal(session.project, 'test/Desktop/project-beta');
+  });
+
+  it('merges same-session rollout fragments into one chronological conversation', () => {
+    const firstPath = writeSession('2026/04/10/rollout-2026-04-10T01-00-00-sess-resumed.jsonl', [
+      {
+        timestamp: '2026-04-10T01:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-resumed',
+          timestamp: '2026-04-10T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-resumed',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-10T01:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'original request' },
+      },
+      {
+        timestamp: '2026-04-10T01:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'first response' },
+      },
+      {
+        timestamp: '2026-04-10T01:10:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'late original follow-up' },
+      },
+      { type: 'custom-title', customTitle: '' },
+    ]);
+    const continuedPath = writeSession('2026/04/11/rollout-2026-04-11T01-00-00-sess-resumed.jsonl', [
+      {
+        timestamp: '2026-04-11T01:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'sess-resumed',
+          timestamp: '2026-04-11T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/project-resumed',
+          source: 'cli',
+          originator: 'codex-tui',
+        },
+      },
+      {
+        timestamp: '2026-04-10T01:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'original request' },
+      },
+      {
+        timestamp: '2026-04-10T01:00:02.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'first response' },
+      },
+      {
+        timestamp: '2026-04-10T01:05:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'continued request' },
+      },
+      {
+        timestamp: '2026-04-10T01:06:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'continued response' },
+      },
+      { type: 'custom-title', customTitle: 'stale title' },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const fragments = sessions.filter(session => session.sessionId === 'sess-resumed');
+      assert.equal(fragments.length, 2);
+      assert.equal(fragments[0].filePath, firstPath,
+        'the fragment with the latest activity remains representative');
+      assert.deepEqual(fragments[0].rolloutFilePaths, [firstPath, continuedPath]);
+      assert.equal(fragments[0].rolloutFirstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(fragments[0].rolloutLastTs, '2026-04-10T01:10:00.000Z');
+      assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(fragments[1].firstTs, '2026-04-11T01:00:00.000Z',
+        'physical rollouts keep distinct timestamps for sorting and list mode');
+      for (const fragment of fragments) updateSessionCacheRecord(sessions, fragment);
+      flushSessionCache(sessions);
+      const cachedFiles = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files;
+      assert.equal(cachedFiles[firstPath].session.firstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(cachedFiles[continuedPath].session.firstTs, '2026-04-11T01:00:00.000Z');
+
+      const originalReadFileSync = fs.readFileSync;
+      fs.readFileSync = function(target, ...args) {
+        if (target === firstPath || target === continuedPath) {
+          throw new Error('detail loading must stream rollout fragments');
+        }
+        return originalReadFileSync.call(this, target, ...args);
+      };
+      try {
+        loadSessionDetail(fragments[0]);
+      } finally {
+        fs.readFileSync = originalReadFileSync;
+      }
+      assert.deepEqual(fragments[0].userMessages, [
+        'original request',
+        'continued request',
+        'late original follow-up',
+      ]);
+      assert.deepEqual(fragments[0].assistantSnippets, ['first response', 'continued response']);
+      assert.equal(fragments[0].topic, 'original request');
+      assert.equal(fragments[0].totalMessages, 5);
+      assert.equal(fragments[0].customTitle, '');
+      assert.equal(fragments[0].firstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(fragments[0].duration, '10m');
+
+      fragments[1]._rolloutFileLastTs = '2026-04-12T01:00:00.000Z';
+      refreshAttachedRolloutBounds(fragments[1]);
+      assert.equal(fragments[0].lastTs, '2026-04-12T01:00:00.000Z',
+        'loaded details receive bounds discovered while another fragment is indexed');
+
+      fragments[0]._detailLoaded = false;
+      loadSessionDetail(fragments[0]);
+      assert.equal(fragments[0].lastTs, '2026-04-12T01:00:00.000Z',
+        'detail loading preserves a fresher timestamp found by background indexing');
+
+      const survivor = fragments[1];
+      const survivorFileFirstTs = survivor._rolloutFileFirstTs;
+      const survivorFileLastTs = survivor._rolloutFileLastTs;
+      survivor._detailLoaded = true;
+      survivor.userMessages = ['stale merged detail'];
+      survivor.firstTs = fragments[0].rolloutFirstTs;
+      survivor.lastTs = '2026-04-12T01:00:00.000Z';
+      attachSessionRolloutFiles(sessions.filter(candidate => candidate !== fragments[0]));
+      assert.deepEqual(survivor.rolloutFilePaths, [continuedPath]);
+      assert.equal(survivor.rolloutFirstTs, '2026-04-11T01:00:00.000Z');
+      assert.equal(survivor.firstTs, survivorFileFirstTs);
+      assert.equal(survivor.lastTs, survivorFileLastTs);
+      assert.equal(survivor._detailLoaded, false);
+      assert.equal(survivor.userMessages, undefined);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(continuedPath);
+    }
+  });
+
+  it('preserves a legitimate repeated first turn in a timestamp-less resume', () => {
+    const firstPath = writeSession('2026/04/08/rollout-2026-04-08T01-00-00-repeat.jsonl', [
+      { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'old answer' } },
+    ]);
+    const resumedPath = writeSession('2026/04/09/rollout-2026-04-09T01-00-00-repeat.jsonl', [
+      { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { type: 'event_msg', payload: { type: 'agent_message', message: 'old answer' } },
+    ]);
+    const session = {
+      sessionId: 'repeat',
+      filePath: resumedPath,
+      rolloutFilePaths: [firstPath, resumedPath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['retry', 'retry']);
+      assert.deepEqual(session.assistantSnippets, ['old answer', 'old answer']);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(resumedPath);
+    }
+  });
+
+  it('preserves same-timestamp repeated turns within one rollout', () => {
+    const timestamp = '2026-04-09T01:00:00.000Z';
+    const filePath = writeSession('2026/04/09/rollout-same-timestamp-repeat.jsonl', [
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { timestamp, type: 'event_msg', payload: { type: 'agent_message', message: 'same answer' } },
+      { timestamp, type: 'event_msg', payload: { type: 'turn_aborted' } },
+      { timestamp, type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
+      { timestamp, type: 'event_msg', payload: { type: 'agent_message', message: 'same answer' } },
+    ]);
+    const session = {
+      sessionId: 'same-timestamp-repeat',
+      filePath,
+      rolloutFilePaths: [filePath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['retry', 'retry']);
+      assert.deepEqual(session.assistantSnippets, ['same answer', 'same answer']);
+    } finally {
+      fs.unlinkSync(filePath);
+    }
+  });
+
+  it('deduplicates local mirrored records before cross-rollout ordering', () => {
+    const firstPath = writeSession('2026/04/09/rollout-2026-04-09T01-00-00-mirrored-order.jsonl', [
+      {
+        timestamp: '2026-04-09T01:00:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'mirrored prompt' }],
+        },
+      },
+      {
+        timestamp: '2026-04-09T01:10:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'mirrored prompt' },
+      },
+    ]);
+    const secondPath = writeSession('2026/04/09/rollout-2026-04-09T01-05-00-middle.jsonl', [
+      {
+        timestamp: '2026-04-09T01:05:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'middle prompt' },
+      },
+    ]);
+    const session = {
+      sessionId: 'mirrored-order',
+      filePath: secondPath,
+      rolloutFilePaths: [firstPath, secondPath],
+      estimatedMessages: 0,
+    };
+
+    try {
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['middle prompt', 'mirrored prompt']);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(secondPath);
+    }
   });
 
   it('deduplicates mirrored message records without removing repeated turns', () => {
