@@ -1111,6 +1111,7 @@ function applySessionSearchData(session, searchData) {
 }
 
 async function resolvePendingSessionSummaries(sessions) {
+  let removedSession = false;
   for (const session of [...sessions]) {
     if (!session._topicPending) continue;
     try {
@@ -1123,8 +1124,12 @@ async function resolvePendingSessionSummaries(sessions) {
       session._searchIndexError = error;
     }
     updateSessionCacheRecord(sessions, session);
-    if (session._excludeFromList) sessions.splice(sessions.indexOf(session), 1);
+    if (session._excludeFromList) {
+      sessions.splice(sessions.indexOf(session), 1);
+      removedSession = true;
+    }
   }
+  if (removedSession) attachSessionRolloutFiles(sessions);
   flushSessionCache(sessions);
 }
 
@@ -1154,6 +1159,9 @@ function serializeSessionForCache(session) {
   for (const field of fields) {
     if (session[field] !== undefined) cached[field] = session[field];
   }
+  if (session._rolloutFileFirstTs !== undefined) cached.firstTs = session._rolloutFileFirstTs;
+  if (session._rolloutFileLastTs !== undefined) cached.lastTs = session._rolloutFileLastTs;
+  cached.duration = formatDuration(cached.firstTs, cached.lastTs);
   cached.topicPending = Boolean(session._topicPending);
   cached.searchIndexed = Boolean(session._searchIndexed);
   return cached;
@@ -2454,7 +2462,10 @@ function createApp({
     updateSessionCacheRecord(allSessions, session);
     if (session._excludeFromList) {
       const index = allSessions.indexOf(session);
-      if (index !== -1) allSessions.splice(index, 1);
+      if (index !== -1) {
+        allSessions.splice(index, 1);
+        attachSessionRolloutFiles(allSessions);
+      }
       refreshUniqueProjects();
     }
 

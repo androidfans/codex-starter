@@ -483,6 +483,11 @@ describe('session parsing', () => {
       assert.deepEqual(fragments[0].rolloutFilePaths, [firstPath, continuedPath]);
       assert.equal(fragments[0].rolloutFirstTs, '2026-04-10T01:00:00.000Z');
       assert.equal(fragments[0].rolloutLastTs, '2026-04-10T01:10:00.000Z');
+      for (const fragment of fragments) updateSessionCacheRecord(sessions, fragment);
+      flushSessionCache(sessions);
+      const cachedFiles = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')).files;
+      assert.equal(cachedFiles[firstPath].session.firstTs, '2026-04-10T01:00:00.000Z');
+      assert.equal(cachedFiles[continuedPath].session.firstTs, '2026-04-11T01:00:00.000Z');
 
       const originalReadFileSync = fs.readFileSync;
       fs.readFileSync = function(target, ...args) {
