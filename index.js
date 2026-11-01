@@ -1116,7 +1116,6 @@ function applySessionSearchData(session, searchData) {
 }
 
 async function resolvePendingSessionSummaries(sessions) {
-  let removedSession = false;
   for (const session of [...sessions]) {
     if (!session._topicPending) continue;
     try {
@@ -1131,10 +1130,9 @@ async function resolvePendingSessionSummaries(sessions) {
     updateSessionCacheRecord(sessions, session);
     if (session._excludeFromList) {
       sessions.splice(sessions.indexOf(session), 1);
-      removedSession = true;
     }
   }
-  if (removedSession) attachSessionRolloutFiles(sessions);
+  attachSessionRolloutFiles(sessions);
   flushSessionCache(sessions);
 }
 
@@ -2473,6 +2471,7 @@ function createApp({
       }
       refreshUniqueProjects();
     }
+    attachSessionRolloutFiles(allSessions);
 
     const summaryChanged = Boolean(session._summaryChangedDuringIndex);
     const activeSortChanged = (sortMode === 'messages' && session._messageCountChangedDuringIndex)
