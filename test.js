@@ -192,6 +192,9 @@ describe('helpers', () => {
     assert.equal(empty.names.size, 0);
 
     fs.unlinkSync(database);
+    const missing = loadCodexThreadNamesResult();
+    assert.equal(missing.ok, false);
+    assert.equal(missing.names.size, 0);
   });
 
   it('prefers manual titles, then Codex AI titles, then the first prompt', () => {
