@@ -336,9 +336,9 @@ childProcess.spawn = function(cmd, args, opts) {
 const mod = require('./index.js');
 let threadNameReadCount = 0;
 
-function readThreadNamesWithTransientFailure() {
+function readThreadNamesWithTransientEmptyResult() {
   threadNameReadCount++;
-  if (threadNameReadCount === 1) return { ok: false, names: new Map() };
+  if (threadNameReadCount === 1) return { ok: true, names: new Map() };
   return {
     ok: true,
     names: new Map([['sess-a-fork-latest', 'generated-latest-title']]),
@@ -369,7 +369,7 @@ function detailText() {
 before(async () => {
   mod.createApp({
     activateInputSource: () => { inputSourceActivationCount++; },
-    readThreadNames: readThreadNamesWithTransientFailure,
+    readThreadNames: readThreadNamesWithTransientEmptyResult,
     threadNameRetryDelays: [0],
   });
   assert.match(widgets.header.getContent(), /indexing search/);
@@ -418,7 +418,7 @@ describe('codex starter tui', () => {
     assert.ok(!widgets.list.items.some(item => item.includes('project-empty')));
   });
 
-  it('refreshes AI titles after a transient startup read failure', () => {
+  it('refreshes AI titles after a transient empty startup result', () => {
     assert.ok(widgets.list.items.some(item => item.includes('generated-latest-title')));
   });
 

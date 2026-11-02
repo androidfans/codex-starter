@@ -128,7 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
-const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
+const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500, 5000, 10000, 20000, 30000];
 const sessionCacheContexts = new WeakMap();
 
 function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
@@ -147,7 +147,7 @@ function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
 
 function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
   const databasePath = findLatestCodexStateDatabase(codexDir);
-  if (!databasePath) return { ok: true, names: new Map() };
+  if (!databasePath) return { ok: false, names: new Map() };
 
   try {
     const result = runCommand('sqlite3', [
@@ -1828,6 +1828,8 @@ function createApp({
   let indexRefreshTimer = null;
   let threadNameRetryTimer = null;
   let threadNameRetryIndex = 0;
+  let threadNamesResolved = initialThreadNames.ok
+    && (initialThreadNames.names.size > 0 || allSessions.length === 0);
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
@@ -2457,15 +2459,18 @@ function createApp({
   }
 
   function scheduleThreadNameRetry() {
-    if (initialThreadNames.ok || threadNameRetryIndex >= threadNameRetryDelays.length) return;
+    if (threadNamesResolved || threadNameRetryIndex >= threadNameRetryDelays.length) return;
     const delay = threadNameRetryDelays[threadNameRetryIndex++];
     threadNameRetryTimer = setTimeout(() => {
       threadNameRetryTimer = null;
       const result = readThreadNames();
-      if (!result.ok) {
+      // An empty successful query is suspicious when local sessions exist:
+      // Codex can expose the database briefly before its names are readable.
+      if (!result.ok || (result.names.size === 0 && allSessions.length > 0)) {
         scheduleThreadNameRetry();
         return;
       }
+      threadNamesResolved = true;
 
       const changed = allSessions.some(session => (
         session.aiTitle !== (result.names.get(session.sessionId) || '')
