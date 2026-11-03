@@ -336,9 +336,9 @@ childProcess.spawn = function(cmd, args, opts) {
 const mod = require('./index.js');
 let threadNameReadCount = 0;
 
-function readThreadNamesWithTransientEmptyResult() {
+function readThreadNamesWithTransientFailure() {
   threadNameReadCount++;
-  if (threadNameReadCount === 1) return { ok: true, names: new Map() };
+  if (threadNameReadCount === 1) return { ok: false, names: new Map() };
   return {
     ok: true,
     names: new Map([['sess-a-fork-latest', 'generated-latest-title']]),
@@ -369,7 +369,7 @@ function detailText() {
 before(async () => {
   mod.createApp({
     activateInputSource: () => { inputSourceActivationCount++; },
-    readThreadNames: readThreadNamesWithTransientEmptyResult,
+    readThreadNames: readThreadNamesWithTransientFailure,
     threadNameRetryDelays: [0],
   });
   assert.match(widgets.header.getContent(), /indexing search/);
@@ -418,8 +418,23 @@ describe('codex starter tui', () => {
     assert.ok(!widgets.list.items.some(item => item.includes('project-empty')));
   });
 
-  it('refreshes AI titles after a transient empty startup result', () => {
+  it('refreshes AI titles after a transient startup read failure', () => {
     assert.ok(widgets.list.items.some(item => item.includes('generated-latest-title')));
+  });
+
+  it('records title loading and retry diagnostics without transcript content', () => {
+    const diagnostics = fs.readFileSync(
+      path.join(codeXDir, 'codex-starter-diagnostics.jsonl'),
+      'utf-8',
+    ).trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(diagnostics.some(entry => entry.event === 'app_start'
+      && entry.initialTitleCount === 0));
+    assert.ok(diagnostics.some(entry => entry.event === 'thread_names_retry_scheduled'));
+    assert.ok(diagnostics.some(entry => entry.event === 'thread_names_retry_result'
+      && entry.usable === true));
+    assert.ok(diagnostics.some(entry => entry.event === 'thread_names_applied'
+      && entry.changedSessionCount > 0));
+    assert.ok(diagnostics.every(entry => !JSON.stringify(entry).includes('build project filter UI')));
   });
 
   it('persists completed search indexes for warm startup', () => {
