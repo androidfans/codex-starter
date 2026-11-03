@@ -126,10 +126,50 @@ const CODEX_DIR = path.join(os.homedir(), '.codex');
 const SESSIONS_DIR = path.join(CODEX_DIR, 'sessions');
 const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
+const DIAGNOSTIC_LOG_FILE = path.join(CODEX_DIR, 'codex-starter-diagnostics.jsonl');
+const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
 const CACHE_VERSION = 1;
 const PENDING_TOPIC = '(loading topic…)';
-const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500, 5000, 10000, 20000, 30000];
+const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
+
+function diagnosticFileState(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return { exists: true, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch (_) {
+    return { exists: false };
+  }
+}
+
+function stateDatabaseDiagnostics(codexDir) {
+  try {
+    return fs.readdirSync(codexDir)
+      .filter(name => /^state_\d+\.sqlite(?:-(?:wal|shm))?$/.test(name))
+      .sort()
+      .map(name => ({ name, ...diagnosticFileState(path.join(codexDir, name)) }));
+  } catch (error) {
+    return [{ error: error.message }];
+  }
+}
+
+function appendDiagnosticLog(event, details = {}) {
+  try {
+    fs.mkdirSync(CODEX_DIR, { recursive: true });
+    if (fs.existsSync(DIAGNOSTIC_LOG_FILE)
+        && fs.statSync(DIAGNOSTIC_LOG_FILE).size >= DIAGNOSTIC_LOG_MAX_BYTES) {
+      const rotatedFile = `${DIAGNOSTIC_LOG_FILE}.1`;
+      if (fs.existsSync(rotatedFile)) fs.unlinkSync(rotatedFile);
+      fs.renameSync(DIAGNOSTIC_LOG_FILE, rotatedFile);
+    }
+    fs.appendFileSync(DIAGNOSTIC_LOG_FILE, `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      pid: process.pid,
+      event,
+      ...details,
+    })}\n`, 'utf-8');
+  } catch (_) { /* diagnostics must never prevent startup */ }
+}
 
 function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
   try {
@@ -146,12 +186,32 @@ function findLatestCodexStateDatabase(codexDir = CODEX_DIR) {
 }
 
 function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSync } = {}) {
+  const startedAt = Date.now();
   const databasePath = findLatestCodexStateDatabase(codexDir);
-  if (!databasePath) return { ok: false, names: new Map() };
+  if (!databasePath) {
+    appendDiagnosticLog('thread_names_read', {
+      ok: true,
+      reason: 'database_not_found',
+      titleCount: 0,
+      durationMs: Date.now() - startedAt,
+      stateFiles: stateDatabaseDiagnostics(codexDir),
+    });
+    return { ok: true, names: new Map() };
+  }
+
+  const databaseState = {
+    database: diagnosticFileState(databasePath),
+    wal: diagnosticFileState(`${databasePath}-wal`),
+    shm: diagnosticFileState(`${databasePath}-shm`),
+  };
 
   try {
     const result = runCommand('sqlite3', [
-      '-readonly',
+      // A cold WAL database may have no -wal/-shm files yet. A read-only OS
+      // open cannot initialize them, so let SQLite create its sidecars while
+      // query_only still prohibits every SQL write on this connection.
+      '-cmd',
+      'PRAGMA query_only=ON;',
       '-json',
       databasePath,
       "SELECT id, name FROM threads WHERE name IS NOT NULL AND trim(name) <> '';",
@@ -161,17 +221,47 @@ function loadCodexThreadNamesResult({ codexDir = CODEX_DIR, runCommand = spawnSy
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (result.error || result.status !== 0) {
+      appendDiagnosticLog('thread_names_read', {
+        ok: false,
+        reason: 'sqlite_command_failed',
+        durationMs: Date.now() - startedAt,
+        databasePath,
+        databaseState,
+        status: result.status ?? null,
+        signal: result.signal ?? null,
+        error: result.error?.message || '',
+        stderr: String(result.stderr || '').trim().slice(-1000),
+      });
       return { ok: false, names: new Map() };
     }
 
     const rows = JSON.parse(String(result.stdout || '[]') || '[]');
-    return { ok: true, names: new Map(rows
+    const names = new Map(rows
       .filter(row => row && typeof row.id === 'string' && typeof row.name === 'string')
       .map(row => [row.id, row.name.trim()])
-      .filter(([, name]) => name)) };
-  } catch (_) {
+      .filter(([, name]) => name));
+    appendDiagnosticLog('thread_names_read', {
+      ok: true,
+      reason: 'success',
+      durationMs: Date.now() - startedAt,
+      databasePath,
+      databaseState,
+      rowCount: Array.isArray(rows) ? rows.length : null,
+      titleCount: names.size,
+      stdoutBytes: Buffer.byteLength(String(result.stdout || '')),
+    });
+    return { ok: true, names };
+  } catch (error) {
     // AI titles are an optional enhancement. Older Codex versions and Linux
     // systems without the sqlite3 CLI continue to use the first user message.
+    appendDiagnosticLog('thread_names_read', {
+      ok: false,
+      reason: 'exception',
+      durationMs: Date.now() - startedAt,
+      databasePath,
+      databaseState,
+      error: error.message,
+    });
     return { ok: false, names: new Map() };
   }
 }
@@ -1810,6 +1900,13 @@ function createApp({
       session.customTitle = sm.customTitle;
     }
   }
+  appendDiagnosticLog('app_start', {
+    sessionCount: allSessions.length,
+    initialThreadNameReadOk: initialThreadNames.ok,
+    initialTitleCount: initialThreadNames.names.size,
+    sessionsWithAiTitle: allSessions.filter(session => session.aiTitle).length,
+    retryDelaysMs: threadNameRetryDelays,
+  });
 
   const expandedFamilyIds = new Set();
   const expandedChainIds = new Set();
@@ -1828,8 +1925,7 @@ function createApp({
   let indexRefreshTimer = null;
   let threadNameRetryTimer = null;
   let threadNameRetryIndex = 0;
-  let threadNamesResolved = initialThreadNames.ok
-    && (initialThreadNames.names.size > 0 || allSessions.length === 0);
+  let threadNamesResolved = initialThreadNames.ok;
   let cancelSearchIndexing = () => {};
 
   const projectColorMap = new Map();
@@ -2459,24 +2555,52 @@ function createApp({
   }
 
   function scheduleThreadNameRetry() {
-    if (threadNamesResolved || threadNameRetryIndex >= threadNameRetryDelays.length) return;
+    if (threadNamesResolved) {
+      appendDiagnosticLog('thread_names_retry_stopped', {
+        reason: 'initial_or_retry_result_accepted',
+        attemptsUsed: threadNameRetryIndex,
+      });
+      return;
+    }
+    if (threadNameRetryIndex >= threadNameRetryDelays.length) {
+      appendDiagnosticLog('thread_names_retry_stopped', {
+        reason: 'attempts_exhausted',
+        attemptsUsed: threadNameRetryIndex,
+      });
+      return;
+    }
     const delay = threadNameRetryDelays[threadNameRetryIndex++];
+    const attempt = threadNameRetryIndex;
+    appendDiagnosticLog('thread_names_retry_scheduled', { attempt, delayMs: delay });
     threadNameRetryTimer = setTimeout(() => {
       threadNameRetryTimer = null;
       const result = readThreadNames();
-      // An empty successful query is suspicious when local sessions exist:
-      // Codex can expose the database briefly before its names are readable.
-      if (!result.ok || (result.names.size === 0 && allSessions.length > 0)) {
+      const usable = result.ok;
+      appendDiagnosticLog('thread_names_retry_result', {
+        attempt,
+        ok: result.ok,
+        titleCount: result.names.size,
+        usable,
+        sessionCount: allSessions.length,
+      });
+      if (!usable) {
         scheduleThreadNameRetry();
         return;
       }
       threadNamesResolved = true;
 
-      const changed = allSessions.some(session => (
+      const changedCount = allSessions.filter(session => (
         session.aiTitle !== (result.names.get(session.sessionId) || '')
-      ));
+      )).length;
       applyCodexThreadNames(allSessions, result.names);
-      if (!changed) return;
+      appendDiagnosticLog('thread_names_applied', {
+        attempt,
+        titleCount: result.names.size,
+        changedSessionCount: changedCount,
+        popupOpen,
+        renameMode,
+      });
+      if (changedCount === 0) return;
       if (popupOpen || renameMode) {
         pendingIndexRefresh = true;
       } else {
@@ -2489,6 +2613,9 @@ function createApp({
     if (!threadNameRetryTimer) return;
     clearTimeout(threadNameRetryTimer);
     threadNameRetryTimer = null;
+    appendDiagnosticLog('thread_names_retry_cancelled', {
+      attemptsUsed: threadNameRetryIndex,
+    });
   }
 
   function applyPendingIndexRefresh() {
@@ -3341,6 +3468,7 @@ if (typeof module !== 'undefined') {
     SESSIONS_DIR,
     META_FILE,
     CACHE_FILE,
+    DIAGNOSTIC_LOG_FILE,
     // CLI
     detectCLI,
     getShellCommand,

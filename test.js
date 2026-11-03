@@ -59,6 +59,7 @@ const {
   SESSIONS_DIR,
   META_FILE,
   CACHE_FILE,
+  DIAGNOSTIC_LOG_FILE,
 } = mod;
 
 function writeSession(relativePath, lines) {
@@ -83,6 +84,10 @@ describe('paths', () => {
     assert.equal(SESSIONS_DIR, path.join(tmpHome, '.codex', 'sessions'));
     assert.equal(META_FILE, path.join(tmpHome, '.codex', 'codex-starter-meta.json'));
     assert.equal(CACHE_FILE, path.join(tmpHome, '.codex', 'codex-starter-cache.json'));
+    assert.equal(
+      DIAGNOSTIC_LOG_FILE,
+      path.join(tmpHome, '.codex', 'codex-starter-diagnostics.jsonl'),
+    );
   });
 });
 
@@ -162,7 +167,11 @@ describe('helpers', () => {
     assert.equal(findLatestCodexStateDatabase(), newestDatabase);
     assert.equal(calls[0].command, 'sqlite3');
     assert.ok(calls[0].args.includes(newestDatabase));
-    assert.deepEqual(calls[0].args.slice(0, 2), ['-readonly', '-json']);
+    assert.deepEqual(calls[0].args.slice(0, 3), [
+      '-cmd',
+      'PRAGMA query_only=ON;',
+      '-json',
+    ]);
     assert.deepEqual(calls[0].options.stdio, ['ignore', 'pipe', 'pipe']);
     assert.equal(names.get('thread-a'), 'Fix login redirect');
     assert.equal(names.has('thread-empty'), false);
@@ -193,8 +202,15 @@ describe('helpers', () => {
 
     fs.unlinkSync(database);
     const missing = loadCodexThreadNamesResult();
-    assert.equal(missing.ok, false);
+    assert.equal(missing.ok, true);
     assert.equal(missing.names.size, 0);
+
+    const diagnostics = fs.readFileSync(DIAGNOSTIC_LOG_FILE, 'utf-8')
+      .trim().split('\n').map(line => JSON.parse(line))
+      .filter(entry => entry.event === 'thread_names_read');
+    assert.ok(diagnostics.some(entry => entry.reason === 'sqlite_command_failed'));
+    assert.ok(diagnostics.some(entry => entry.reason === 'success' && entry.titleCount === 0));
+    assert.ok(diagnostics.some(entry => entry.reason === 'database_not_found'));
   });
 
   it('prefers manual titles, then Codex AI titles, then the first prompt', () => {
