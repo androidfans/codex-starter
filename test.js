@@ -726,7 +726,10 @@ describe('session parsing', () => {
           payload: {
             id: 'fork-history-child',
             forked_from_id: 'fork-history-parent',
-            forked_from_ordinal_exclusive: 16,
+            history_base: {
+              thread_id: 'fork-history-child',
+              end_ordinal_exclusive: 21,
+            },
             timestamp: '2026-04-14T03:30:00.000Z',
             cwd: '/Users/test/Desktop/fork-history',
             source: 'vscode',
@@ -1179,7 +1182,10 @@ describe('session parsing', () => {
         payload: {
           id: 'fork-child',
           forked_from_id: 'fork-parent',
-          history_base: { end_ordinal_exclusive: 42 },
+          history_base: {
+            thread_id: 'fork-parent',
+            end_ordinal_exclusive: 42,
+          },
           timestamp: '2026-04-13T04:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-child',
           source: 'cli',

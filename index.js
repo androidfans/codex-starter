@@ -695,7 +695,8 @@ function getForkOrdinalExclusive(payload = {}) {
   if (Number.isInteger(payload.forked_from_ordinal_exclusive)) {
     return payload.forked_from_ordinal_exclusive;
   }
-  return Number.isInteger(payload.history_base?.end_ordinal_exclusive)
+  return payload.history_base?.thread_id === payload.forked_from_id
+    && Number.isInteger(payload.history_base?.end_ordinal_exclusive)
     ? payload.history_base.end_ordinal_exclusive
     : null;
 }
@@ -767,14 +768,17 @@ function attachSessionRolloutFiles(sessions) {
     const groupForkedFromId = rollouts.find(rollout => rollout.forkedFromId)?.forkedFromId || '';
     const groupForkedFromOrdinal = rollouts
       .map(rollout => rollout.forkedFromOrdinalExclusive)
-      .find(Number.isInteger);
+      .filter(Number.isInteger)
+      .reduce((earliest, ordinal) => Math.min(earliest, ordinal), Infinity);
     const groupHasEmbeddedForkHistory = rollouts.some(rollout => (
       rollout.hasEmbeddedForkHistory
     ));
     for (const rollout of rollouts) {
       if (!rollout.forkedFromId) rollout.forkedFromId = groupForkedFromId;
       if (!Number.isInteger(rollout.forkedFromOrdinalExclusive)) {
-        rollout.forkedFromOrdinalExclusive = groupForkedFromOrdinal ?? null;
+        rollout.forkedFromOrdinalExclusive = Number.isFinite(groupForkedFromOrdinal)
+          ? groupForkedFromOrdinal
+          : null;
       }
       rollout._hasEmbeddedForkHistory = groupHasEmbeddedForkHistory;
     }
