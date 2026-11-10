@@ -526,7 +526,7 @@ function forEachLineSync(filePath, callback) {
         const line = pending.substring(0, newlineIndex);
         pending = pending.substring(newlineIndex + 1);
         searchFrom = 0;
-        if (line.trim()) callback(line);
+        if (line.trim() && callback(line) === false) return;
       }
     }
     pending += decoder.end();
@@ -708,6 +708,11 @@ function getLineTimestamp(line) {
   return match ? match[1] : null;
 }
 
+function getLineOrdinal(line) {
+  const match = line.substring(0, 512).match(/"ordinal"\s*:\s*(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
 function formatDuration(firstTs, lastTs) {
   if (!firstTs || !lastTs) return '';
   const diffMs = new Date(lastTs).getTime() - new Date(firstTs).getTime();
@@ -811,6 +816,8 @@ function attachSessionRolloutFiles(sessions) {
     const visitedSessionIds = new Set([session.sessionId]);
     let descendant = session;
     let parentId = descendant.forkedFromId;
+    let effectiveForkOrdinal = null;
+    let effectiveForkTime = null;
 
     // Newer Codex forks keep only the parent UUID in the child rollout. Walk
     // the available parent chain and retain an edge-specific cutoff so later
@@ -828,12 +835,25 @@ function attachSessionRolloutFiles(sessions) {
         ? descendant.forkedFromOrdinalExclusive
         : null;
       if (!parent || (!forkTimestamp && forkOrdinal === null)) break;
+      if (forkOrdinal !== null) {
+        effectiveForkOrdinal = effectiveForkOrdinal === null
+          ? forkOrdinal
+          : Math.min(effectiveForkOrdinal, forkOrdinal);
+      }
+      const forkTime = forkTimestamp ? new Date(forkTimestamp).getTime() : NaN;
+      if (Number.isFinite(forkTime)) {
+        effectiveForkTime = effectiveForkTime === null
+          ? forkTime
+          : Math.min(effectiveForkTime, forkTime);
+      }
 
       inheritedRolloutGroups.push({
         sessionId: parent.sessionId,
         filePaths: [...(parent.rolloutFilePaths || [parent.filePath])],
-        beforeOrdinal: forkOrdinal,
-        beforeTimestamp: forkTimestamp,
+        beforeOrdinal: effectiveForkOrdinal,
+        beforeTimestamp: effectiveForkTime === null
+          ? forkTimestamp
+          : new Date(effectiveForkTime).toISOString(),
       });
       descendant = parent;
       parentId = parent.forkedFromId;
@@ -1050,6 +1070,12 @@ function loadSessionDetail(session) {
     let lineIndex = 0;
     forEachLineSync(filePath, (line) => {
       try {
+        // Ordinals are monotonic within a physical rollout. Once an inherited
+        // source reaches its exclusive boundary, later records cannot belong
+        // to the selected branch and may contain very large tool payloads.
+        const lineOrdinal = getLineOrdinal(line);
+        if (beforeOrdinal !== null && lineOrdinal !== null
+            && lineOrdinal >= beforeOrdinal) return false;
         const entry = JSON.parse(line);
         const timestamp = getEntryTimestamp(entry);
         const timestampMs = timestamp ? new Date(timestamp).getTime() : NaN;
@@ -1123,6 +1149,7 @@ function loadSessionDetail(session) {
         }
       } catch (_) { /* ignore */ }
       lineIndex++;
+      return true;
     });
 
     const fallbackTime = Number.isFinite(fileAnchorTime) ? fileAnchorTime : fileIndex;

@@ -580,6 +580,12 @@ describe('session parsing', () => {
         },
       },
       {
+        timestamp: '2026-04-14T00:08:00.000Z',
+        ordinal: 8,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'early root request' },
+      },
+      {
         timestamp: '2026-04-14T00:09:00.000Z',
         ordinal: 9,
         type: 'response_item',
@@ -734,6 +740,30 @@ describe('session parsing', () => {
         },
       ],
     );
+    const editedChildPath = writeSession(
+      '2026/04/14/rollout-2026-04-14T12-00-00-fork-edited-child.jsonl',
+      [
+        {
+          timestamp: '2026-04-14T04:00:00.000Z',
+          ordinal: 10,
+          type: 'session_meta',
+          payload: {
+            id: 'fork-history-edited-child',
+            forked_from_id: 'fork-history-parent',
+            forked_from_ordinal_exclusive: 10,
+            timestamp: '2026-04-14T04:00:00.000Z',
+            cwd: '/Users/test/Desktop/fork-history',
+            source: 'vscode',
+          },
+        },
+        {
+          timestamp: '2026-04-14T04:01:00.000Z',
+          ordinal: 11,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'edited child request' },
+        },
+      ],
+    );
 
     try {
       const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
@@ -761,6 +791,7 @@ describe('session parsing', () => {
 
       loadSessionDetail(child);
       assert.deepEqual(child.userMessages, [
+        'early root request',
         'root request',
         'parent request',
         'child request',
@@ -771,10 +802,25 @@ describe('session parsing', () => {
         'parent response',
         'child response',
       ]);
-      assert.equal(child.totalMessages, 7);
+      assert.equal(child.totalMessages, 8);
       assert.equal(child.topic, 'child request', 'the first fork-local prompt wins over continuation');
       assert.deepEqual(child.toolsUsed, ['root_tool', 'parent_tool', 'child_tool']);
       assert.equal(child.firstTs, '2026-04-14T02:00:00.000Z');
+
+      const editedChild = sessions.find(session => (
+        session.sessionId === 'fork-history-edited-child'
+      ));
+      assert.deepEqual(
+        editedChild._inheritedRolloutGroups.map(group => group.beforeOrdinal),
+        [10, 10],
+        'an earlier descendant edit caps every ancestor edge',
+      );
+      loadSessionDetail(editedChild);
+      assert.deepEqual(editedChild.userMessages, [
+        'early root request',
+        'edited child request',
+      ]);
+      assert.deepEqual(editedChild.toolsUsed, ['root_tool']);
 
       const sessionsWithoutOriginalChild = sessions.filter(session => (
         session.filePath !== childPath
@@ -801,6 +847,7 @@ describe('session parsing', () => {
       fs.unlinkSync(parentPath);
       fs.unlinkSync(childPath);
       fs.unlinkSync(childResumePath);
+      fs.unlinkSync(editedChildPath);
     }
   });
 
