@@ -128,7 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const DIAGNOSTIC_LOG_FILE = path.join(CODEX_DIR, 'codex-starter-diagnostics.jsonl');
 const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 const PENDING_TOPIC = '(loading topic…)';
 const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
@@ -905,11 +905,17 @@ function attachSessionRolloutFiles(sessions) {
       .filter(Boolean)
       .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
       || session.firstTs;
-    session._selectedRolloutLastTs = selectedRollouts
-      .map(rollout => rollout._rolloutFileLastTs)
+    const selectedRolloutByPath = new Map(selectedRollouts.map(rollout => (
+      [rollout.filePath, rollout]
+    )));
+    session._selectedUnboundedLastTs = nextSelectedSources
+      .filter(source => source.beforeOrdinal === null)
+      .map(source => selectedRolloutByPath.get(source.filePath))
+      .map(rollout => rollout?._rolloutFileLastTs)
       .filter(Boolean)
       .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
       || session.lastTs;
+    session._selectedRolloutLastTs = session._selectedUnboundedLastTs;
   }
 
   const representativeBySessionId = new Map();
@@ -1002,7 +1008,8 @@ function refreshAttachedRolloutBounds(session) {
   const rollouts = session._rolloutGroup || [session];
   const rolloutByPath = new Map(rollouts.map(rollout => [rollout.filePath, rollout]));
   for (const rollout of rollouts) {
-    const selectedRollouts = (rollout._selectedRolloutSources || [])
+    const selectedSources = rollout._selectedRolloutSources || [];
+    const selectedRollouts = selectedSources
       .map(source => rolloutByPath.get(source.filePath))
       .filter(Boolean);
     if (selectedRollouts.length === 0) selectedRollouts.push(rollout);
@@ -1010,16 +1017,21 @@ function refreshAttachedRolloutBounds(session) {
       .map(selected => selected._rolloutFileFirstTs)
       .filter(Boolean)
       .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-    const lastTs = selectedRollouts
-      .map(selected => selected._rolloutFileLastTs)
+    const selectedUnboundedLastTs = (selectedSources.length > 0
+      ? selectedSources
+        .filter(source => source.beforeOrdinal === null)
+        .map(source => rolloutByPath.get(source.filePath))
+      : [rollout])
+      .map(selected => selected?._rolloutFileLastTs)
       .filter(Boolean)
       .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
-    const refreshedLastTs = rollout._detailLoaded && rollout._selectedContentLastTs
-      ? rollout._selectedContentLastTs
-      : lastTs;
+    const refreshedLastTs = [rollout._selectedContentLastTs, selectedUnboundedLastTs]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
     if (firstTs) rollout.rolloutFirstTs = firstTs;
     if (refreshedLastTs) rollout.rolloutLastTs = refreshedLastTs;
     if (firstTs) rollout._selectedRolloutFirstTs = firstTs;
+    if (selectedUnboundedLastTs) rollout._selectedUnboundedLastTs = selectedUnboundedLastTs;
     if (refreshedLastTs) rollout._selectedRolloutLastTs = refreshedLastTs;
     if (rollout._detailLoaded) {
       if (firstTs) rollout.firstTs = firstTs;
@@ -1403,7 +1415,12 @@ function loadSessionDetail(session) {
     ? null
     : new Date(latestLocalRecordTime).toISOString();
   const selectedFirstTs = session._selectedRolloutFirstTs || session.rolloutFirstTs;
-  const selectedLastTs = session._selectedContentLastTs
+  const selectedLastTs = [
+    session._selectedContentLastTs,
+    session._selectedUnboundedLastTs,
+  ]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
     || session._selectedRolloutLastTs
     || session.rolloutLastTs;
   if (selectedFirstTs
@@ -1654,13 +1671,13 @@ function deserializeSessionFromCache(filePath, stat, cached) {
 }
 
 function makeSessionCacheRecord(stat, session = null) {
+  const interactive = Boolean(session);
   return {
     size: stat.size,
     mtimeMs: stat.mtimeMs,
+    interactive,
     included: Boolean(session && !session._excludeFromList),
-    ...(session && !session._excludeFromList
-      ? { session: serializeSessionForCache(session) }
-      : {}),
+    ...(session ? { session: serializeSessionForCache(session) } : {}),
   };
 }
 
@@ -1735,18 +1752,11 @@ function loadAllSessions(options = {}) {
       const cachedRecord = previousCache.files[filePath];
       if (cacheFingerprintMatches(cachedRecord, stat)) {
         nextCache.files[filePath] = cachedRecord;
-        if (cachedRecord.included && cachedRecord.session) {
+        if (cachedRecord.session) {
           const session = deserializeSessionFromCache(filePath, stat, cachedRecord.session);
-          sessions.push(session);
+          session._excludeFromList = !cachedRecord.included;
+          if (cachedRecord.included) sessions.push(session);
           graphSessions.push(session);
-        } else {
-          const canonicalMetaEntry = readCanonicalSessionMeta(filePath);
-          if (canonicalMetaEntry
-              && isInteractiveSession(sessionClassificationFromMeta(canonicalMetaEntry))) {
-            const connector = loadSessionQuick(filePath, { stat, canonicalMetaEntry });
-            connector._excludeFromList = true;
-            graphSessions.push(connector);
-          }
         }
         continue;
       }

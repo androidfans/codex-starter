@@ -1154,6 +1154,18 @@ describe('session parsing', () => {
       assert.ok(!child.userMessages.includes('abandoned parent suffix'));
       assert.equal(child.lastTs, '2026-04-16T04:01:00.000Z');
 
+      const childContinuation = sessions.find(session => (
+        session.filePath === childContinuationPath
+      ));
+      childContinuation._rolloutFileLastTs = '2026-04-16T05:00:00.000Z';
+      refreshAttachedRolloutBounds(childContinuation);
+      assert.equal(child.lastTs, '2026-04-16T05:00:00.000Z',
+        'fresh indexing on the unbounded terminal rollout advances Last active');
+      child._detailLoaded = false;
+      loadSessionDetail(child);
+      assert.equal(child.lastTs, '2026-04-16T05:00:00.000Z',
+        'detail loading does not regress a fresher terminal rollout timestamp');
+
       fs.unlinkSync(childPath);
       const reloadedSessions = loadAllSessions({ threadNames: new Map() });
       const reloadedChild = reloadedSessions.find(session => session.sessionId === childId);
@@ -1325,7 +1337,20 @@ describe('session parsing', () => {
         'after empty connector',
       ]);
 
-      const reloaded = loadAllSessions({ threadNames: new Map() });
+      const originalOpenSync = fs.openSync;
+      let connectorOpens = 0;
+      fs.openSync = function(target, ...args) {
+        if (target === connectorPath) connectorOpens++;
+        return originalOpenSync.call(this, target, ...args);
+      };
+      let reloaded;
+      try {
+        reloaded = loadAllSessions({ threadNames: new Map() });
+      } finally {
+        fs.openSync = originalOpenSync;
+      }
+      assert.equal(connectorOpens, 0,
+        'a hidden cached connector is restored without reparsing its rollout');
       assert.ok(!reloaded.some(session => session.filePath === connectorPath));
       const reloadedLatest = reloaded.find(session => session.filePath === latestPath);
       loadSessionDetail(reloadedLatest);
@@ -2123,7 +2148,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 3);
+    assert.equal(rebuilt.version, 4);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });
