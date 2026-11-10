@@ -726,10 +726,6 @@ describe('session parsing', () => {
           payload: {
             id: 'fork-history-child',
             forked_from_id: 'fork-history-parent',
-            history_base: {
-              thread_id: 'fork-history-child',
-              end_ordinal_exclusive: 21,
-            },
             timestamp: '2026-04-14T03:30:00.000Z',
             cwd: '/Users/test/Desktop/fork-history',
             source: 'vscode',
@@ -1120,6 +1116,66 @@ describe('session parsing', () => {
       fs.unlinkSync(siblingPath);
       if (fs.existsSync(childPath)) fs.unlinkSync(childPath);
       fs.unlinkSync(childContinuationPath);
+    }
+  });
+
+  it('uses an exact physical base when an intermediate session is missing', () => {
+    const rootId = '66666666-6666-7666-8666-666666666666';
+    const missingParentId = '77777777-7777-7777-8777-777777777777';
+    const childId = '88888888-8888-7888-8888-888888888888';
+    const rootPath = writeSession(`2026/04/17/rollout-2026-04-17T08-00-00-${rootId}.jsonl`, [
+      {
+        timestamp: '2026-04-17T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: rootId,
+          timestamp: '2026-04-17T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/missing-intermediate',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-17T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'surviving grandparent request' },
+      },
+    ]);
+    const childPath = writeSession(`2026/04/17/rollout-2026-04-17T09-00-00-${childId}.jsonl`, [
+      {
+        timestamp: '2026-04-17T01:00:00.000Z',
+        ordinal: 2,
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          forked_from_id: missingParentId,
+          forked_from_ordinal_exclusive: 2,
+          timestamp: '2026-04-17T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/missing-intermediate',
+          source: 'vscode',
+          history_base: { thread_id: rootId, end_ordinal_exclusive: 2 },
+        },
+      },
+      {
+        timestamp: '2026-04-17T01:01:00.000Z',
+        ordinal: 3,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'child after missing intermediate' },
+      },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === childId);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'surviving grandparent request',
+        'child after missing intermediate',
+      ]);
+    } finally {
+      fs.unlinkSync(rootPath);
+      fs.unlinkSync(childPath);
     }
   });
 

@@ -848,10 +848,12 @@ function attachSessionRolloutFiles(sessions) {
     const physicalChain = localPhysicalChain(session);
     const hasResolvedPhysicalHistory = physicalChain.length > 1
       || (session.historyBaseThreadId && rolloutByThreadId.has(session.historyBaseThreadId));
-    const selectedRollouts = hasResolvedPhysicalHistory ? physicalChain : rollouts;
+    const selectedRollouts = hasResolvedPhysicalHistory
+      ? physicalChain
+      : (session.historyBaseThreadId ? [session] : rollouts);
     const nextSelectedSources = hasResolvedPhysicalHistory
       ? sourcesForPhysicalChain(physicalChain)
-      : [...rollouts].reverse().map(rollout => ({
+      : [...selectedRollouts].reverse().map(rollout => ({
         filePath: rollout.filePath,
         beforeOrdinal: null,
       }));
@@ -870,20 +872,20 @@ function attachSessionRolloutFiles(sessions) {
 
     const oldestSelectedRollout = physicalChain.at(-1) || session;
     const historyParent = rolloutByThreadId.get(oldestSelectedRollout.historyBaseThreadId);
-    const rawHistoryBaseTargetsParent = Boolean(session.forkedFromId)
-      && (historyParent?.sessionId === session.forkedFromId
+    const rawHistoryBaseTargetsAncestor = Boolean(session.forkedFromId)
+      && ((historyParent && historyParent.sessionId !== session.sessionId)
         || (!historyParent
           && oldestSelectedRollout.historyBaseThreadId === session.forkedFromId));
     const persistedParentThreadId = selectedRollouts
       .map(rollout => rollout.parentHistoryThreadId)
       .find(Boolean) || '';
-    const parentHistoryThreadId = rawHistoryBaseTargetsParent
+    const parentHistoryThreadId = rawHistoryBaseTargetsAncestor
       ? oldestSelectedRollout.historyBaseThreadId
       : persistedParentThreadId;
     const forkOrdinals = selectedRollouts
       .map(rollout => rollout.forkedFromOrdinalExclusive)
       .filter(Number.isInteger);
-    if (rawHistoryBaseTargetsParent
+    if (rawHistoryBaseTargetsAncestor
         && Number.isInteger(oldestSelectedRollout.historyBaseEndOrdinalExclusive)) {
       forkOrdinals.push(oldestSelectedRollout.historyBaseEndOrdinalExclusive);
     }
@@ -929,7 +931,8 @@ function attachSessionRolloutFiles(sessions) {
       // reaching outside that file would import the same history a second time.
       if (descendant._hasEmbeddedForkHistory ?? descendant.hasEmbeddedForkHistory) break;
       visitedSessionIds.add(parentId);
-      const parent = representativeBySessionId.get(parentId);
+      const physicalParent = rolloutByThreadId.get(descendant._parentHistoryThreadId);
+      const parent = physicalParent || representativeBySessionId.get(parentId);
       const forkTimestamp = descendant._selectedRolloutFirstTs
         || descendant.rolloutFirstTs
         || descendant._rolloutFileFirstTs
