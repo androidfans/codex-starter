@@ -844,19 +844,9 @@ function attachSessionRolloutFiles(sessions) {
   }
 
   for (const session of sessions) {
-    const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
     const physicalChain = localPhysicalChain(session);
-    const hasResolvedPhysicalHistory = physicalChain.length > 1
-      || (session.historyBaseThreadId && rolloutByThreadId.has(session.historyBaseThreadId));
-    const selectedRollouts = hasResolvedPhysicalHistory
-      ? physicalChain
-      : (session.historyBaseThreadId ? [session] : rollouts);
-    const nextSelectedSources = hasResolvedPhysicalHistory
-      ? sourcesForPhysicalChain(physicalChain)
-      : [...selectedRollouts].reverse().map(rollout => ({
-        filePath: rollout.filePath,
-        beforeOrdinal: null,
-      }));
+    const selectedRollouts = physicalChain;
+    const nextSelectedSources = sourcesForPhysicalChain(physicalChain);
     const previousSelectedSources = session._selectedRolloutSources || [];
     const selectedPathsChanged = JSON.stringify(previousSelectedSources)
       !== JSON.stringify(nextSelectedSources);
@@ -872,20 +862,21 @@ function attachSessionRolloutFiles(sessions) {
 
     const oldestSelectedRollout = physicalChain.at(-1) || session;
     const historyParent = rolloutByThreadId.get(oldestSelectedRollout.historyBaseThreadId);
-    const rawHistoryBaseTargetsAncestor = Boolean(session.forkedFromId)
-      && ((historyParent && historyParent.sessionId !== session.sessionId)
-        || (!historyParent
-          && oldestSelectedRollout.historyBaseThreadId === session.forkedFromId));
+    const rawHistoryBaseIdentifiesAncestor = Boolean(session.forkedFromId)
+      && Boolean(oldestSelectedRollout.historyBaseThreadId)
+      && (!historyParent || historyParent.sessionId !== session.sessionId);
+    const rawHistoryBaseSuppliesForkBoundary = rawHistoryBaseIdentifiesAncestor
+      && (Boolean(historyParent)
+        || oldestSelectedRollout.historyBaseThreadId === session.forkedFromId);
     const persistedParentThreadId = selectedRollouts
       .map(rollout => rollout.parentHistoryThreadId)
       .find(Boolean) || '';
-    const parentHistoryThreadId = rawHistoryBaseTargetsAncestor
-      ? oldestSelectedRollout.historyBaseThreadId
-      : persistedParentThreadId;
+    const parentHistoryThreadId = persistedParentThreadId
+      || (rawHistoryBaseIdentifiesAncestor ? oldestSelectedRollout.historyBaseThreadId : '');
     const forkOrdinals = selectedRollouts
       .map(rollout => rollout.forkedFromOrdinalExclusive)
       .filter(Number.isInteger);
-    if (rawHistoryBaseTargetsAncestor
+    if (rawHistoryBaseSuppliesForkBoundary
         && Number.isInteger(oldestSelectedRollout.historyBaseEndOrdinalExclusive)) {
       forkOrdinals.push(oldestSelectedRollout.historyBaseEndOrdinalExclusive);
     }
@@ -940,7 +931,9 @@ function attachSessionRolloutFiles(sessions) {
       const forkOrdinal = Number.isInteger(descendant.forkedFromOrdinalExclusive)
         ? descendant.forkedFromOrdinalExclusive
         : null;
-      if (!parent || (!forkTimestamp && forkOrdinal === null)) break;
+      // Timestamp-only fork ancestry belongs to the retired Rewind format.
+      // Current Codex rollouts provide an ordinal and a physical history edge.
+      if (!parent || forkOrdinal === null) break;
       if (forkOrdinal !== null) {
         effectiveForkOrdinal = effectiveForkOrdinal === null
           ? forkOrdinal
