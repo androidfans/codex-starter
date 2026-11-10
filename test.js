@@ -979,6 +979,12 @@ describe('session parsing', () => {
         type: 'event_msg',
         payload: { type: 'user_message', message: 'physical parent request' },
       },
+      {
+        timestamp: '2026-04-16T00:02:00.000Z',
+        ordinal: 2,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'abandoned parent suffix' },
+      },
     ]);
     const chosenPath = writeSession(
       `2026/04/16/rollout-2026-04-16T09-00-00-${parentId}_${chosenThreadId}.jsonl`,
@@ -1085,6 +1091,7 @@ describe('session parsing', () => {
         'physical child continuation',
       ]);
       assert.ok(!child.userMessages.includes('unrelated sibling continuation'));
+      assert.ok(!child.userMessages.includes('abandoned parent suffix'));
 
       fs.unlinkSync(childPath);
       const reloadedSessions = loadAllSessions({ threadNames: new Map() });
@@ -1098,9 +1105,18 @@ describe('session parsing', () => {
         'physical child continuation',
       ]);
       assert.ok(!reloadedChild.userMessages.includes('unrelated sibling continuation'));
+
+      fs.unlinkSync(chosenPath);
+      const missingParentSessions = loadAllSessions({ threadNames: new Map() });
+      const childWithMissingParent = missingParentSessions.find(session => (
+        session.sessionId === childId
+      ));
+      loadSessionDetail(childWithMissingParent);
+      assert.deepEqual(childWithMissingParent.userMessages, ['physical child continuation']);
+      assert.ok(!childWithMissingParent.userMessages.includes('unrelated sibling continuation'));
     } finally {
       fs.unlinkSync(parentPath);
-      fs.unlinkSync(chosenPath);
+      if (fs.existsSync(chosenPath)) fs.unlinkSync(chosenPath);
       fs.unlinkSync(siblingPath);
       if (fs.existsSync(childPath)) fs.unlinkSync(childPath);
       fs.unlinkSync(childContinuationPath);

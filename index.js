@@ -825,10 +825,22 @@ function attachSessionRolloutFiles(sessions) {
     return chain;
   }
 
-  function physicalHistoryPaths(startThreadId, sessionId) {
+  function sourcesForPhysicalChain(chain) {
+    let beforeOrdinal = null;
+    const sources = [];
+    for (const rollout of chain) {
+      sources.push({ filePath: rollout.filePath, beforeOrdinal });
+      beforeOrdinal = Number.isInteger(rollout.historyBaseEndOrdinalExclusive)
+        ? rollout.historyBaseEndOrdinalExclusive
+        : null;
+    }
+    return sources.reverse();
+  }
+
+  function physicalHistorySources(startThreadId, sessionId) {
     const start = rolloutByThreadId.get(startThreadId);
     if (!start || start.sessionId !== sessionId) return [];
-    return localPhysicalChain(start).reverse().map(rollout => rollout.filePath);
+    return sourcesForPhysicalChain(localPhysicalChain(start));
   }
 
   for (const session of sessions) {
@@ -837,12 +849,17 @@ function attachSessionRolloutFiles(sessions) {
     const hasResolvedPhysicalHistory = physicalChain.length > 1
       || (session.historyBaseThreadId && rolloutByThreadId.has(session.historyBaseThreadId));
     const selectedRollouts = hasResolvedPhysicalHistory ? physicalChain : rollouts;
-    const nextSelectedPaths = selectedRollouts
-      .map(rollout => rollout.filePath)
-      .reverse();
-    const previousSelectedPaths = session._selectedRolloutFilePaths || [];
-    const selectedPathsChanged = previousSelectedPaths.length !== nextSelectedPaths.length
-      || previousSelectedPaths.some((filePath, index) => filePath !== nextSelectedPaths[index]);
+    const nextSelectedSources = hasResolvedPhysicalHistory
+      ? sourcesForPhysicalChain(physicalChain)
+      : [...rollouts].reverse().map(rollout => ({
+        filePath: rollout.filePath,
+        beforeOrdinal: null,
+      }));
+    const previousSelectedSources = session._selectedRolloutSources || [];
+    const selectedPathsChanged = JSON.stringify(previousSelectedSources)
+      !== JSON.stringify(nextSelectedSources);
+    session._selectedRolloutSources = nextSelectedSources;
+    const nextSelectedPaths = nextSelectedSources.map(source => source.filePath);
     session._selectedRolloutFilePaths = nextSelectedPaths;
     if (selectedPathsChanged) invalidateSessionDetail(session);
 
@@ -859,10 +876,7 @@ function attachSessionRolloutFiles(sessions) {
           && oldestSelectedRollout.historyBaseThreadId === session.forkedFromId));
     const persistedParentThreadId = selectedRollouts
       .map(rollout => rollout.parentHistoryThreadId)
-      .find((threadId) => {
-        const target = rolloutByThreadId.get(threadId);
-        return target?.sessionId === session.forkedFromId || threadId === session.forkedFromId;
-      }) || '';
+      .find(Boolean) || '';
     const parentHistoryThreadId = rawHistoryBaseTargetsParent
       ? oldestSelectedRollout.historyBaseThreadId
       : persistedParentThreadId;
@@ -937,18 +951,26 @@ function attachSessionRolloutFiles(sessions) {
           ? forkTime
           : Math.min(effectiveForkTime, forkTime);
       }
-      const selectedParentPaths = physicalHistoryPaths(
+      const selectedParentSources = physicalHistorySources(
         descendant._parentHistoryThreadId,
         parent.sessionId,
       );
+      if (descendant._parentHistoryThreadId && selectedParentSources.length === 0) break;
+      const fallbackParentSources = (parent._selectedRolloutSources
+        || (parent._selectedRolloutFilePaths
+          || parent.rolloutFilePaths
+          || [parent.filePath]).map(filePath => ({
+          filePath,
+          beforeOrdinal: null,
+        })));
+      const parentSources = selectedParentSources.length > 0
+        ? selectedParentSources
+        : fallbackParentSources;
 
       inheritedRolloutGroups.push({
         sessionId: parent.sessionId,
-        filePaths: selectedParentPaths.length > 0
-          ? selectedParentPaths
-          : [...(parent._selectedRolloutFilePaths
-            || parent.rolloutFilePaths
-            || [parent.filePath])],
+        sources: parentSources,
+        filePaths: parentSources.map(source => source.filePath),
         beforeOrdinal: effectiveForkOrdinal,
         beforeTimestamp: effectiveForkTime === null
           ? forkTimestamp
@@ -1136,21 +1158,37 @@ function loadSessionDetail(session) {
   const toolsUsed = new Set();
   const inheritedSources = (session._inheritedRolloutGroups || []).flatMap(group => {
     const beforeTime = new Date(group.beforeTimestamp).getTime();
-    const beforeOrdinal = Number.isInteger(group.beforeOrdinal) ? group.beforeOrdinal : null;
-    if (!Number.isFinite(beforeTime) && beforeOrdinal === null) return [];
-    return group.filePaths.map(filePath => ({
+    const groupBeforeOrdinal = Number.isInteger(group.beforeOrdinal)
+      ? group.beforeOrdinal
+      : null;
+    if (!Number.isFinite(beforeTime) && groupBeforeOrdinal === null) return [];
+    const groupSources = group.sources || group.filePaths.map(filePath => ({
       filePath,
-      beforeTime: Number.isFinite(beforeTime) ? beforeTime : null,
-      beforeOrdinal,
-      isLocal: false,
+      beforeOrdinal: null,
     }));
+    return groupSources.map((source) => {
+      const sourceBeforeOrdinal = Number.isInteger(source.beforeOrdinal)
+        ? source.beforeOrdinal
+        : null;
+      const beforeOrdinal = [groupBeforeOrdinal, sourceBeforeOrdinal]
+        .filter(Number.isInteger)
+        .reduce((earliest, ordinal) => Math.min(earliest, ordinal), Infinity);
+      return {
+        filePath: source.filePath,
+        beforeTime: Number.isFinite(beforeTime) ? beforeTime : null,
+        beforeOrdinal: Number.isFinite(beforeOrdinal) ? beforeOrdinal : null,
+        isLocal: false,
+      };
+    });
   });
-  const localSources = (session._selectedRolloutFilePaths
-    || session.rolloutFilePaths
-    || [session.filePath]).map(filePath => ({
-    filePath,
+  const selectedLocalSources = session._selectedRolloutSources
+    || (session._selectedRolloutFilePaths
+      || session.rolloutFilePaths
+      || [session.filePath]).map(filePath => ({ filePath, beforeOrdinal: null }));
+  const localSources = selectedLocalSources.map(source => ({
+    filePath: source.filePath,
     beforeTime: null,
-    beforeOrdinal: null,
+    beforeOrdinal: Number.isInteger(source.beforeOrdinal) ? source.beforeOrdinal : null,
     isLocal: true,
   }));
   const sources = [...inheritedSources, ...localSources]
@@ -1699,6 +1737,7 @@ function loadAllSessions(options = {}) {
   for (const session of sessions) {
     try {
       const stat = fs.statSync(session.filePath);
+      if (!cacheFingerprintMatches(session._cacheFingerprint, stat)) continue;
       const refreshedRecord = makeSessionCacheRecord(stat, session);
       if (JSON.stringify(nextCache.files[session.filePath]) === JSON.stringify(refreshedRecord)) {
         continue;
