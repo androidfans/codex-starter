@@ -570,6 +570,7 @@ describe('session parsing', () => {
     const rootPath = writeSession('2026/04/14/rollout-2026-04-14T08-00-00-fork-root.jsonl', [
       {
         timestamp: '2026-04-14T00:00:00.000Z',
+        ordinal: 0,
         type: 'session_meta',
         payload: {
           id: 'fork-history-root',
@@ -579,17 +580,26 @@ describe('session parsing', () => {
         },
       },
       {
+        timestamp: '2026-04-14T00:09:00.000Z',
+        ordinal: 9,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'root_tool', arguments: '{}' },
+      },
+      {
         timestamp: '2026-04-14T00:10:00.000Z',
+        ordinal: 10,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'root request' },
       },
       {
         timestamp: '2026-04-14T00:11:00.000Z',
+        ordinal: 11,
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'root response' },
       },
       {
-        timestamp: '2026-04-14T01:30:00.000Z',
+        timestamp: '2026-04-14T00:30:00.000Z',
+        ordinal: 12,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'root request after parent fork' },
       },
@@ -599,6 +609,7 @@ describe('session parsing', () => {
       [
         {
           timestamp: '2026-04-14T03:00:00.000Z',
+          ordinal: 10,
           type: 'session_meta',
           payload: {
             id: 'fork-history-root',
@@ -609,16 +620,19 @@ describe('session parsing', () => {
         },
         {
           timestamp: '2026-04-14T00:10:00.000Z',
+          ordinal: 10,
           type: 'event_msg',
           payload: { type: 'user_message', message: 'root request' },
         },
         {
           timestamp: '2026-04-14T00:11:00.000Z',
+          ordinal: 11,
           type: 'event_msg',
           payload: { type: 'agent_message', message: 'root response' },
         },
         {
           timestamp: '2026-04-14T03:01:00.000Z',
+          ordinal: 20,
           type: 'event_msg',
           payload: { type: 'agent_message', message: 'root response after all forks' },
         },
@@ -627,27 +641,38 @@ describe('session parsing', () => {
     const parentPath = writeSession('2026/04/14/rollout-2026-04-14T09-00-00-fork-parent.jsonl', [
       {
         timestamp: '2026-04-14T01:00:00.000Z',
+        ordinal: 12,
         type: 'session_meta',
         payload: {
           id: 'fork-history-parent',
           forked_from_id: 'fork-history-root',
+          forked_from_ordinal_exclusive: 12,
           timestamp: '2026-04-14T01:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-history',
           source: 'vscode',
         },
       },
       {
+        timestamp: '2026-04-14T01:09:00.000Z',
+        ordinal: 13,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'parent_tool', arguments: '{}' },
+      },
+      {
         timestamp: '2026-04-14T01:10:00.000Z',
+        ordinal: 14,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'parent request' },
       },
       {
         timestamp: '2026-04-14T01:11:00.000Z',
+        ordinal: 15,
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'parent response' },
       },
       {
-        timestamp: '2026-04-14T02:30:00.000Z',
+        timestamp: '2026-04-14T01:30:00.000Z',
+        ordinal: 16,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'parent request after child fork' },
       },
@@ -655,26 +680,60 @@ describe('session parsing', () => {
     const childPath = writeSession('2026/04/14/rollout-2026-04-14T10-00-00-fork-child.jsonl', [
       {
         timestamp: '2026-04-14T02:00:00.000Z',
+        ordinal: 16,
         type: 'session_meta',
         payload: {
           id: 'fork-history-child',
           forked_from_id: 'fork-history-parent',
+          forked_from_ordinal_exclusive: 16,
           timestamp: '2026-04-14T02:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-history',
           source: 'vscode',
         },
       },
       {
+        timestamp: '2026-04-14T02:09:00.000Z',
+        ordinal: 17,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'child_tool', arguments: '{}' },
+      },
+      {
         timestamp: '2026-04-14T02:10:00.000Z',
+        ordinal: 18,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'child request' },
       },
       {
         timestamp: '2026-04-14T02:11:00.000Z',
+        ordinal: 19,
         type: 'event_msg',
         payload: { type: 'agent_message', message: 'child response' },
       },
     ]);
+    const childResumePath = writeSession(
+      '2026/04/14/rollout-2026-04-14T11-30-00-fork-child-resume.jsonl',
+      [
+        {
+          timestamp: '2026-04-14T03:30:00.000Z',
+          ordinal: 20,
+          type: 'session_meta',
+          payload: {
+            id: 'fork-history-child',
+            forked_from_id: 'fork-history-parent',
+            forked_from_ordinal_exclusive: 16,
+            timestamp: '2026-04-14T03:30:00.000Z',
+            cwd: '/Users/test/Desktop/fork-history',
+            source: 'vscode',
+          },
+        },
+        {
+          timestamp: '2026-04-14T03:31:00.000Z',
+          ordinal: 21,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'child continuation' },
+        },
+      ],
+    );
 
     try {
       const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
@@ -683,43 +742,128 @@ describe('session parsing', () => {
       assert.deepEqual(
         child._inheritedRolloutGroups.map(group => ({
           sessionId: group.sessionId,
+          beforeOrdinal: group.beforeOrdinal,
           beforeTimestamp: group.beforeTimestamp,
         })),
         [
           {
             sessionId: 'fork-history-root',
+            beforeOrdinal: 12,
             beforeTimestamp: '2026-04-14T01:00:00.000Z',
           },
           {
             sessionId: 'fork-history-parent',
+            beforeOrdinal: 16,
             beforeTimestamp: '2026-04-14T02:00:00.000Z',
           },
         ],
       );
 
       loadSessionDetail(child);
-      assert.deepEqual(child.userMessages, ['root request', 'parent request', 'child request']);
+      assert.deepEqual(child.userMessages, [
+        'root request',
+        'parent request',
+        'child request',
+        'child continuation',
+      ]);
       assert.deepEqual(child.assistantSnippets, [
         'root response',
         'parent response',
         'child response',
       ]);
-      assert.equal(child.totalMessages, 6);
-      assert.equal(child.topic, 'child request', 'fork-local title metadata stays unchanged');
+      assert.equal(child.totalMessages, 7);
+      assert.equal(child.topic, 'child request', 'the first fork-local prompt wins over continuation');
+      assert.deepEqual(child.toolsUsed, ['root_tool', 'parent_tool', 'child_tool']);
       assert.equal(child.firstTs, '2026-04-14T02:00:00.000Z');
 
-      const sessionsWithoutParent = sessions.filter(session => (
+      const sessionsWithoutOriginalChild = sessions.filter(session => (
+        session.filePath !== childPath
+      ));
+      attachSessionRolloutFiles(sessionsWithoutOriginalChild);
+      assert.equal(child._inheritedRolloutGroups.at(-1).beforeOrdinal, 16,
+        'the fork ordinal survives deletion of the original physical rollout');
+      child._detailLoaded = false;
+      loadSessionDetail(child);
+      assert.ok(!child.userMessages.includes('parent request after child fork'));
+
+      const sessionsWithoutParent = sessionsWithoutOriginalChild.filter(session => (
         session.sessionId !== 'fork-history-parent'
       ));
       attachSessionRolloutFiles(sessionsWithoutParent);
       assert.equal(child._detailLoaded, false);
       assert.deepEqual(child._inheritedRolloutGroups, []);
       loadSessionDetail(child);
-      assert.deepEqual(child.userMessages, ['child request']);
-      assert.deepEqual(child.assistantSnippets, ['child response']);
+      assert.deepEqual(child.userMessages, ['child continuation']);
+      assert.deepEqual(child.assistantSnippets, []);
     } finally {
       fs.unlinkSync(rootPath);
       fs.unlinkSync(rootResumePath);
+      fs.unlinkSync(parentPath);
+      fs.unlinkSync(childPath);
+      fs.unlinkSync(childResumePath);
+    }
+  });
+
+  it('does not re-import history embedded in legacy fork rollouts', () => {
+    const parentPath = writeSession('2026/04/15/rollout-legacy-parent.jsonl', [
+      {
+        timestamp: '2026-04-15T00:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+        },
+      },
+      {
+        timestamp: '2026-04-15T00:01:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'embedded parent request' },
+      },
+    ]);
+    const childPath = writeSession('2026/04/15/rollout-legacy-child.jsonl', [
+      {
+        timestamp: '2026-04-15T01:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-child',
+          forked_from_id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+        },
+      },
+      {
+        timestamp: '2026-04-15T00:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+        },
+      },
+      {
+        timestamp: '2026-04-15T01:00:01.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'embedded parent request' },
+      },
+      {
+        timestamp: '2026-04-15T01:01:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'legacy child request' },
+      },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === 'legacy-fork-child');
+      assert.equal(child.hasEmbeddedForkHistory, true);
+      assert.deepEqual(child._inheritedRolloutGroups, []);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, ['embedded parent request', 'legacy child request']);
+    } finally {
       fs.unlinkSync(parentPath);
       fs.unlinkSync(childPath);
     }
@@ -952,6 +1096,7 @@ describe('session parsing', () => {
         payload: {
           id: 'fork-child',
           forked_from_id: 'fork-parent',
+          forked_from_ordinal_exclusive: 42,
           timestamp: '2026-04-13T04:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-child',
           source: 'cli',
@@ -979,6 +1124,8 @@ describe('session parsing', () => {
     const session = loadSessionQuick(filePath);
     assert.equal(session.sessionId, 'fork-child');
     assert.equal(session.forkedFromId, 'fork-parent');
+    assert.equal(session.forkedFromOrdinalExclusive, 42);
+    assert.equal(session.hasEmbeddedForkHistory, true);
     assert.deepEqual(session.ancestorIds, ['fork-parent']);
 
     loadSessionDetail(session);
@@ -1502,7 +1649,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 1);
+    assert.equal(rebuilt.version, 2);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });

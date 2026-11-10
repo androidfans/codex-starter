@@ -128,7 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const DIAGNOSTIC_LOG_FILE = path.join(CODEX_DIR, 'codex-starter-diagnostics.jsonl');
 const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const PENDING_TOPIC = '(loading topic…)';
 const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
@@ -750,6 +750,20 @@ function attachSessionRolloutFiles(sessions) {
   for (const session of sessions) {
     const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
     session._rolloutGroup = rollouts;
+    const groupForkedFromId = rollouts.find(rollout => rollout.forkedFromId)?.forkedFromId || '';
+    const groupForkedFromOrdinal = rollouts
+      .map(rollout => rollout.forkedFromOrdinalExclusive)
+      .find(Number.isInteger);
+    const groupHasEmbeddedForkHistory = rollouts.some(rollout => (
+      rollout.hasEmbeddedForkHistory
+    ));
+    for (const rollout of rollouts) {
+      if (!rollout.forkedFromId) rollout.forkedFromId = groupForkedFromId;
+      if (!Number.isInteger(rollout.forkedFromOrdinalExclusive)) {
+        rollout.forkedFromOrdinalExclusive = groupForkedFromOrdinal ?? null;
+      }
+      rollout.hasEmbeddedForkHistory = groupHasEmbeddedForkHistory;
+    }
     const previousFilePaths = session.rolloutFilePaths || [session.filePath];
     const nextFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
       .sort((a, b) => a.localeCompare(b));
@@ -793,16 +807,23 @@ function attachSessionRolloutFiles(sessions) {
     // the available parent chain and retain an edge-specific cutoff so later
     // work on an ancestor branch never leaks into the selected conversation.
     while (parentId && !visitedSessionIds.has(parentId)) {
+      // Older fork rollouts already contain their inherited conversation, so
+      // reaching outside that file would import the same history a second time.
+      if (descendant.hasEmbeddedForkHistory) break;
       visitedSessionIds.add(parentId);
       const parent = representativeBySessionId.get(parentId);
       const forkTimestamp = descendant.rolloutFirstTs
         || descendant._rolloutFileFirstTs
         || descendant.firstTs;
-      if (!parent || !forkTimestamp) break;
+      const forkOrdinal = Number.isInteger(descendant.forkedFromOrdinalExclusive)
+        ? descendant.forkedFromOrdinalExclusive
+        : null;
+      if (!parent || (!forkTimestamp && forkOrdinal === null)) break;
 
       inheritedRolloutGroups.push({
         sessionId: parent.sessionId,
         filePaths: [...(parent.rolloutFilePaths || [parent.filePath])],
+        beforeOrdinal: forkOrdinal,
         beforeTimestamp: forkTimestamp,
       });
       descendant = parent;
@@ -858,8 +879,10 @@ function loadSessionQuick(filePath, options = {}) {
   let source = '';
   let originator = '';
   let forkedFromId = '';
+  let forkedFromOrdinalExclusive = null;
   let threadSource = '';
   const ancestorIds = [];
+  let hasEmbeddedForkHistory = false;
   let firstUserMsg = '';
   let userMsgCount = 0;
   let assistantMsgCount = 0;
@@ -888,13 +911,18 @@ function loadSessionQuick(filePath, options = {}) {
     source = payload.source || '';
     originator = payload.originator || '';
     forkedFromId = payload.forked_from_id || '';
+    forkedFromOrdinalExclusive = Number.isInteger(payload.forked_from_ordinal_exclusive)
+      ? payload.forked_from_ordinal_exclusive
+      : null;
     threadSource = payload.thread_source || '';
   }
 
   // Fork history begins with one session_meta per inherited generation. Read
   // that contiguous prefix without a byte cap so deep edit chains retain
   // enough ancestry to survive deletion of intermediate rollout files.
-  for (const metaEntry of readLeadingSessionMetaEntries(filePath, headText)) {
+  const leadingMetaEntries = readLeadingSessionMetaEntries(filePath, headText);
+  hasEmbeddedForkHistory = leadingMetaEntries.length > 1;
+  for (const metaEntry of leadingMetaEntries) {
     const payload = metaEntry.payload || {};
     for (const candidate of [payload.id, payload.forked_from_id]) {
       if (candidate && candidate !== sessionId && !ancestorIds.includes(candidate)) {
@@ -946,8 +974,10 @@ function loadSessionQuick(filePath, options = {}) {
     source,
     originator,
     forkedFromId,
+    forkedFromOrdinalExclusive,
     threadSource,
     ancestorIds,
+    hasEmbeddedForkHistory,
     modelProvider,
     fileSize: stat.size,
     duration: durationStr,
@@ -968,16 +998,19 @@ function loadSessionDetail(session) {
   const toolsUsed = new Set();
   const inheritedSources = (session._inheritedRolloutGroups || []).flatMap(group => {
     const beforeTime = new Date(group.beforeTimestamp).getTime();
-    if (!Number.isFinite(beforeTime)) return [];
+    const beforeOrdinal = Number.isInteger(group.beforeOrdinal) ? group.beforeOrdinal : null;
+    if (!Number.isFinite(beforeTime) && beforeOrdinal === null) return [];
     return group.filePaths.map(filePath => ({
       filePath,
-      beforeTime,
+      beforeTime: Number.isFinite(beforeTime) ? beforeTime : null,
+      beforeOrdinal,
       isLocal: false,
     }));
   });
   const localSources = (session.rolloutFilePaths || [session.filePath]).map(filePath => ({
     filePath,
     beforeTime: null,
+    beforeOrdinal: null,
     isLocal: true,
   }));
   const sources = [...inheritedSources, ...localSources]
@@ -1002,7 +1035,9 @@ function loadSessionDetail(session) {
   }
 
   sources.forEach((source, fileIndex) => {
-    const { filePath, beforeTime, isLocal } = source;
+    const {
+      filePath, beforeTime, beforeOrdinal, isLocal,
+    } = source;
     const fileRecords = [];
     let fileAnchorTime = fileNameTimestamp(filePath);
     let lineIndex = 0;
@@ -1031,20 +1066,33 @@ function loadSessionDetail(session) {
           session.source = payload.source || session.source;
           session.originator = payload.originator || session.originator;
           session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+          session.forkedFromOrdinalExclusive = Number.isInteger(
+            payload.forked_from_ordinal_exclusive,
+          )
+            ? payload.forked_from_ordinal_exclusive
+            : session.forkedFromOrdinalExclusive ?? null;
           session.threadSource = payload.thread_source || session.threadSource || '';
         }
 
         const message = getConversationMessage(entry);
         const payload = entry.payload || {};
+        const toolName = entry.type === 'response_item'
+          && payload.type === 'function_call' && payload.name
+          ? payload.name
+          : '';
         const isTurnBoundary = entry.type === 'event_msg'
           && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
-        if (message || isTurnBoundary) {
+        if (message || isTurnBoundary || toolName) {
           const record = {
             message,
+            toolName,
             isTurnBoundary,
             timestamp: timestamp || '',
             timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+            ordinal: Number.isInteger(entry.ordinal) ? entry.ordinal : null,
             beforeTime,
+            beforeOrdinal,
+            isLocal,
             fileIndex,
             lineIndex,
           };
@@ -1064,9 +1112,6 @@ function loadSessionDetail(session) {
           }
         }
 
-        if (isLocal && entry.type === 'response_item') {
-          if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
-        }
         const titleUpdate = getCustomTitleUpdate(entry);
         if (filePath === session.filePath && titleUpdate !== null) {
           session.customTitle = titleUpdate;
@@ -1092,7 +1137,16 @@ function loadSessionDetail(session) {
     for (const record of fileRecords) {
       // The cutoff belongs to this exact ancestor edge. A grandparent stops at
       // the parent fork, while the parent can contribute until the child fork.
-      if (record.beforeTime !== null && record.sortTime >= record.beforeTime) continue;
+      const afterOrdinalCutoff = record.beforeOrdinal !== null && record.ordinal !== null
+        && record.ordinal >= record.beforeOrdinal;
+      const afterTimeCutoff = (record.beforeOrdinal === null || record.ordinal === null)
+        && record.beforeTime !== null
+        && record.sortTime >= record.beforeTime;
+      if (afterOrdinalCutoff || afterTimeCutoff) continue;
+      if (record.toolName) {
+        toolsUsed.add(record.toolName);
+        continue;
+      }
       // Content equality cannot distinguish a timestamp-less history replay
       // from an intentional retry, so preserve it rather than lose a turn.
       const key = record.timestamp ? recordKey(record) : '';
@@ -1125,6 +1179,9 @@ function loadSessionDetail(session) {
     .filter(message => !message.isTurnBoundary && message.role === 'assistant')
     .map(message => message.text.substring(0, 400));
   const totalMessages = userMessages.length + assistantSnippets.length;
+  const firstLocalUserMessage = sourceOrderedRecords.find(record => (
+    record.isLocal && record.message?.role === 'user'
+  ))?.message.text;
 
   session.userMessages = userMessages;
   session.assistantSnippets = assistantSnippets;
@@ -1142,8 +1199,8 @@ function loadSessionDetail(session) {
   }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
-  if (userMessages.length > 0 && inheritedSources.length === 0) {
-    session.topic = trimTopic(userMessages[0]) || session.topic;
+  if (firstLocalUserMessage) {
+    session.topic = trimTopic(firstLocalUserMessage) || session.topic;
   }
   return session;
 }
@@ -1350,7 +1407,8 @@ function serializeSessionForCache(session) {
   const fields = [
     'sessionId', 'project', 'topic', 'customTitle', 'firstTs', 'lastTs',
     'version', 'gitBranch', 'cwd', 'source', 'originator', 'forkedFromId',
-    'threadSource', 'ancestorIds', 'modelProvider', 'duration',
+    'forkedFromOrdinalExclusive', 'threadSource', 'ancestorIds',
+    'hasEmbeddedForkHistory', 'modelProvider', 'duration',
     'estimatedMessages', 'searchText',
   ];
   for (const field of fields) {
