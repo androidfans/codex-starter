@@ -999,25 +999,27 @@ function attachSessionRolloutFiles(sessions) {
 
 function refreshAttachedRolloutBounds(session) {
   const rollouts = session._rolloutGroup || [session];
-  const firstTs = rollouts
-    .map(rollout => rollout._rolloutFileFirstTs)
-    .filter(Boolean)
-    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-  const lastTs = rollouts
-    .map(rollout => rollout._rolloutFileLastTs)
-    .filter(Boolean)
-    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  const rolloutByPath = new Map(rollouts.map(rollout => [rollout.filePath, rollout]));
   for (const rollout of rollouts) {
+    const selectedRollouts = (rollout._selectedRolloutSources || [])
+      .map(source => rolloutByPath.get(source.filePath))
+      .filter(Boolean);
+    if (selectedRollouts.length === 0) selectedRollouts.push(rollout);
+    const firstTs = selectedRollouts
+      .map(selected => selected._rolloutFileFirstTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
+    const lastTs = selectedRollouts
+      .map(selected => selected._rolloutFileLastTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
     if (firstTs) rollout.rolloutFirstTs = firstTs;
     if (lastTs) rollout.rolloutLastTs = lastTs;
+    if (firstTs) rollout._selectedRolloutFirstTs = firstTs;
+    if (lastTs) rollout._selectedRolloutLastTs = lastTs;
     if (rollout._detailLoaded) {
-      if (firstTs && new Date(firstTs).getTime()
-          < (rollout.firstTs ? new Date(rollout.firstTs).getTime() : Infinity)) {
-        rollout.firstTs = firstTs;
-      }
-      if (lastTs && new Date(lastTs).getTime() > new Date(rollout.lastTs || 0).getTime()) {
-        rollout.lastTs = lastTs;
-      }
+      if (firstTs) rollout.firstTs = firstTs;
+      if (lastTs) rollout.lastTs = lastTs;
       rollout.duration = formatDuration(rollout.firstTs, rollout.lastTs);
     }
   }
