@@ -566,6 +566,69 @@ describe('session parsing', () => {
     }
   });
 
+  it('merges current paginated ordinal fragments without physical links', () => {
+    const sessionId = '99999999-9999-7999-8999-999999999999';
+    const continuationId = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
+    const firstPath = writeSession(`2026/04/12/rollout-current-${sessionId}.jsonl`, [
+      {
+        timestamp: '2026-04-12T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-12T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/current-unlinked',
+          source: 'vscode',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-12T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'first current fragment' },
+      },
+    ]);
+    const continuationPath = writeSession(
+      `2026/04/12/rollout-current-${sessionId}_${continuationId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-12T00:02:00.000Z',
+          ordinal: 0,
+          type: 'session_meta',
+          payload: {
+            id: sessionId,
+            timestamp: '2026-04-12T00:02:00.000Z',
+            cwd: '/Users/test/Desktop/current-unlinked',
+            source: 'vscode',
+            history_mode: 'paginated',
+          },
+        },
+        {
+          timestamp: '2026-04-12T00:03:00.000Z',
+          ordinal: 1,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'second current fragment' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const session = sessions.find(candidate => (
+        candidate.sessionId === sessionId && candidate.filePath === continuationPath
+      ));
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, [
+        'first current fragment',
+        'second current fragment',
+      ]);
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(continuationPath);
+    }
+  });
+
   it.skip('fork ancestry without physical history links', () => {
     const rootPath = writeSession('2026/04/14/rollout-2026-04-14T08-00-00-fork-root.jsonl', [
       {
@@ -1958,7 +2021,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 3);
+    assert.equal(rebuilt.version, 4);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });

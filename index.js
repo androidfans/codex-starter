@@ -128,7 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const DIAGNOSTIC_LOG_FILE = path.join(CODEX_DIR, 'codex-starter-diagnostics.jsonl');
 const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
-const CACHE_VERSION = 3;
+const CACHE_VERSION = 4;
 const PENDING_TOPIC = '(loading topic…)';
 const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
@@ -844,9 +844,25 @@ function attachSessionRolloutFiles(sessions) {
   }
 
   for (const session of sessions) {
+    const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
     const physicalChain = localPhysicalChain(session);
-    const selectedRollouts = physicalChain;
-    const nextSelectedSources = sourcesForPhysicalChain(physicalChain);
+    const hasResolvedPhysicalHistory = physicalChain.length > 1;
+    const isCurrentUnlinkedGroup = rollouts.length > 1 && rollouts.every(rollout => (
+      rollout.hasOrdinal
+      && rollout.historyMode === 'paginated'
+      && !rollout.historyBaseThreadId
+    ));
+    // Current Codex can still emit paginated ordinal fragments without links.
+    // Pre-ordinal fragments are intentionally not merged across files.
+    const selectedRollouts = hasResolvedPhysicalHistory
+      ? physicalChain
+      : (isCurrentUnlinkedGroup ? rollouts : physicalChain);
+    const nextSelectedSources = hasResolvedPhysicalHistory
+      ? sourcesForPhysicalChain(physicalChain)
+      : [...selectedRollouts].reverse().map(rollout => ({
+        filePath: rollout.filePath,
+        beforeOrdinal: null,
+      }));
     const previousSelectedSources = session._selectedRolloutSources || [];
     const selectedPathsChanged = JSON.stringify(previousSelectedSources)
       !== JSON.stringify(nextSelectedSources);
@@ -871,7 +887,12 @@ function attachSessionRolloutFiles(sessions) {
     const persistedParentThreadId = selectedRollouts
       .map(rollout => rollout.parentHistoryThreadId)
       .find(Boolean) || '';
-    const parentHistoryThreadId = persistedParentThreadId
+    const resolvedRawParentThreadId = historyParent
+      && historyParent.sessionId !== session.sessionId
+      ? oldestSelectedRollout.historyBaseThreadId
+      : '';
+    const parentHistoryThreadId = resolvedRawParentThreadId
+      || persistedParentThreadId
       || (rawHistoryBaseIdentifiesAncestor ? oldestSelectedRollout.historyBaseThreadId : '');
     const forkOrdinals = selectedRollouts
       .map(rollout => rollout.forkedFromOrdinalExclusive)
@@ -1028,6 +1049,8 @@ function loadSessionQuick(filePath, options = {}) {
   let forkedFromOrdinalExclusive = null;
   let historyBaseThreadId = '';
   let historyBaseEndOrdinalExclusive = null;
+  let historyMode = '';
+  let hasOrdinal = false;
   let threadSource = '';
   const ancestorIds = [];
   let hasEmbeddedForkHistory = false;
@@ -1066,6 +1089,8 @@ function loadSessionQuick(filePath, options = {}) {
     )
       ? payload.history_base.end_ordinal_exclusive
       : null;
+    historyMode = payload.history_mode || '';
+    hasOrdinal = Number.isInteger(canonicalMetaEntry.ordinal);
     threadSource = payload.thread_source || '';
   }
 
@@ -1130,6 +1155,8 @@ function loadSessionQuick(filePath, options = {}) {
     rolloutThreadId: getRolloutThreadId(filePath, sessionLabel),
     historyBaseThreadId,
     historyBaseEndOrdinalExclusive,
+    historyMode,
+    hasOrdinal,
     parentHistoryThreadId: '',
     threadSource,
     ancestorIds,
@@ -1596,7 +1623,8 @@ function serializeSessionForCache(session) {
     'version', 'gitBranch', 'cwd', 'source', 'originator', 'forkedFromId',
     'forkedFromOrdinalExclusive', 'threadSource', 'ancestorIds',
     'hasEmbeddedForkHistory', 'rolloutThreadId', 'historyBaseThreadId',
-    'historyBaseEndOrdinalExclusive', 'parentHistoryThreadId', 'modelProvider', 'duration',
+    'historyBaseEndOrdinalExclusive', 'historyMode', 'hasOrdinal',
+    'parentHistoryThreadId', 'modelProvider', 'duration',
     'estimatedMessages', 'searchText',
   ];
   for (const field of fields) {
