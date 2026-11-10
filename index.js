@@ -758,8 +758,9 @@ function invalidateSessionDetail(session) {
 }
 
 function attachSessionRolloutFiles(sessions) {
+  const graphSessions = sessions._rolloutGraph || sessions;
   const rolloutsBySessionId = new Map();
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     if (!session.sessionId || !session.filePath) continue;
     if (!Object.hasOwn(session, '_rolloutFileFirstTs')) {
       session._rolloutFileFirstTs = session.firstTs;
@@ -769,7 +770,7 @@ function attachSessionRolloutFiles(sessions) {
     rolloutsBySessionId.get(session.sessionId).push(session);
   }
 
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
     session._rolloutGroup = rollouts;
     const previousFilePaths = session.rolloutFilePaths || [session.filePath];
@@ -801,7 +802,7 @@ function attachSessionRolloutFiles(sessions) {
   // A canonical session can have sibling resume/rewind rollouts. The
   // history_base thread IDs identify the one physical lineage a fork saw.
   const rolloutByThreadId = new Map();
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     session.rolloutThreadId ||= getRolloutThreadId(
       session.filePath,
       path.basename(session.filePath, '.jsonl'),
@@ -843,7 +844,7 @@ function attachSessionRolloutFiles(sessions) {
     return sourcesForPhysicalChain(localPhysicalChain(start));
   }
 
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     const physicalChain = localPhysicalChain(session);
     // Same-ID files without a physical link can be mutually exclusive rewinds
     // with edited prompts. Only an explicit history_base edge authorizes merge.
@@ -912,7 +913,7 @@ function attachSessionRolloutFiles(sessions) {
   }
 
   const representativeBySessionId = new Map();
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     if (session.sessionId && !representativeBySessionId.has(session.sessionId)) {
       representativeBySessionId.set(session.sessionId, session);
     }
@@ -1013,13 +1014,16 @@ function refreshAttachedRolloutBounds(session) {
       .map(selected => selected._rolloutFileLastTs)
       .filter(Boolean)
       .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+    const refreshedLastTs = rollout._detailLoaded && rollout._selectedContentLastTs
+      ? rollout._selectedContentLastTs
+      : lastTs;
     if (firstTs) rollout.rolloutFirstTs = firstTs;
-    if (lastTs) rollout.rolloutLastTs = lastTs;
+    if (refreshedLastTs) rollout.rolloutLastTs = refreshedLastTs;
     if (firstTs) rollout._selectedRolloutFirstTs = firstTs;
-    if (lastTs) rollout._selectedRolloutLastTs = lastTs;
+    if (refreshedLastTs) rollout._selectedRolloutLastTs = refreshedLastTs;
     if (rollout._detailLoaded) {
       if (firstTs) rollout.firstTs = firstTs;
-      if (lastTs) rollout.lastTs = lastTs;
+      if (refreshedLastTs) rollout.lastTs = refreshedLastTs;
       rollout.duration = formatDuration(rollout.firstTs, rollout.lastTs);
     }
   }
@@ -1166,6 +1170,7 @@ function loadSessionDetail(session) {
   const sourceOrderedRecords = [];
   const timestampedRecordSources = new Map();
   const toolsUsed = new Set();
+  let latestLocalRecordTime = null;
   const inheritedSources = (session._inheritedRolloutGroups || []).flatMap(group => {
     const beforeTime = new Date(group.beforeTimestamp).getTime();
     const groupBeforeOrdinal = Number.isInteger(group.beforeOrdinal)
@@ -1344,6 +1349,11 @@ function loadSessionDetail(session) {
         && record.beforeTime !== null
         && record.sortTime >= record.beforeTime;
       if (afterOrdinalCutoff || afterTimeCutoff) continue;
+      if (record.isLocal && Number.isFinite(record.sortTime)) {
+        latestLocalRecordTime = latestLocalRecordTime === null
+          ? record.sortTime
+          : Math.max(latestLocalRecordTime, record.sortTime);
+      }
       if (record.toolName) {
         toolsUsed.add(record.toolName);
         continue;
@@ -1389,8 +1399,13 @@ function loadSessionDetail(session) {
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
+  session._selectedContentLastTs = latestLocalRecordTime === null
+    ? null
+    : new Date(latestLocalRecordTime).toISOString();
   const selectedFirstTs = session._selectedRolloutFirstTs || session.rolloutFirstTs;
-  const selectedLastTs = session._selectedRolloutLastTs || session.rolloutLastTs;
+  const selectedLastTs = session._selectedContentLastTs
+    || session._selectedRolloutLastTs
+    || session.rolloutLastTs;
   if (selectedFirstTs
       && new Date(selectedFirstTs).getTime()
         < (session.firstTs ? new Date(session.firstTs).getTime() : Infinity)) {
@@ -1706,6 +1721,7 @@ function flushSessionCache(sessions) {
 
 function loadAllSessions(options = {}) {
   const sessions = [];
+  const graphSessions = [];
   const useCache = options.useCache !== false;
   const previousCache = useCache ? loadSessionCache() : emptySessionCache();
   const nextCache = emptySessionCache();
@@ -1720,7 +1736,17 @@ function loadAllSessions(options = {}) {
       if (cacheFingerprintMatches(cachedRecord, stat)) {
         nextCache.files[filePath] = cachedRecord;
         if (cachedRecord.included && cachedRecord.session) {
-          sessions.push(deserializeSessionFromCache(filePath, stat, cachedRecord.session));
+          const session = deserializeSessionFromCache(filePath, stat, cachedRecord.session);
+          sessions.push(session);
+          graphSessions.push(session);
+        } else {
+          const canonicalMetaEntry = readCanonicalSessionMeta(filePath);
+          if (canonicalMetaEntry
+              && isInteractiveSession(sessionClassificationFromMeta(canonicalMetaEntry))) {
+            const connector = loadSessionQuick(filePath, { stat, canonicalMetaEntry });
+            connector._excludeFromList = true;
+            graphSessions.push(connector);
+          }
         }
         continue;
       }
@@ -1736,6 +1762,7 @@ function loadAllSessions(options = {}) {
       const session = loadSessionQuick(filePath, { stat, canonicalMetaEntry });
       if (session.firstTs) {
         sessions.push(session);
+        graphSessions.push(session);
         nextCache.files[filePath] = makeSessionCacheRecord(stat, session);
       } else {
         nextCache.files[filePath] = makeSessionCacheRecord(stat);
@@ -1743,6 +1770,14 @@ function loadAllSessions(options = {}) {
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  graphSessions.sort((a, b) => (
+    new Date(b.lastTs || 0).getTime() - new Date(a.lastTs || 0).getTime()
+  ));
+  Object.defineProperty(sessions, '_rolloutGraph', {
+    value: graphSessions,
+    configurable: true,
+    writable: true,
+  });
   attachSessionRolloutFiles(sessions);
   // Attachment can recover a stable fork edge from another physical fragment;
   // persist it so deleting that source rollout does not lose the boundary.
@@ -3459,6 +3494,8 @@ function createApp({
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
+      const graphIdx = allSessions._rolloutGraph?.indexOf(session) ?? -1;
+      if (graphIdx !== -1) allSessions._rolloutGraph.splice(graphIdx, 1);
       attachSessionRolloutFiles(allSessions);
       reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
       saveMeta(meta);

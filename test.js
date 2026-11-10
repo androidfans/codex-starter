@@ -1040,7 +1040,7 @@ describe('session parsing', () => {
         payload: { type: 'user_message', message: 'physical parent request' },
       },
       {
-        timestamp: '2026-04-16T00:02:00.000Z',
+        timestamp: '2026-04-18T00:02:00.000Z',
         ordinal: 2,
         type: 'event_msg',
         payload: { type: 'user_message', message: 'abandoned parent suffix' },
@@ -1152,6 +1152,7 @@ describe('session parsing', () => {
       ]);
       assert.ok(!child.userMessages.includes('unrelated sibling continuation'));
       assert.ok(!child.userMessages.includes('abandoned parent suffix'));
+      assert.equal(child.lastTs, '2026-04-16T04:01:00.000Z');
 
       fs.unlinkSync(childPath);
       const reloadedSessions = loadAllSessions({ threadNames: new Map() });
@@ -1240,6 +1241,102 @@ describe('session parsing', () => {
     } finally {
       fs.unlinkSync(rootPath);
       fs.unlinkSync(childPath);
+    }
+  });
+
+  it('keeps hidden empty rollouts as physical graph connectors', () => {
+    const sessionId = 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
+    const connectorId = 'cccccccc-cccc-7ccc-8ccc-cccccccccccc';
+    const latestId = 'dddddddd-dddd-7ddd-8ddd-dddddddddddd';
+    const rootPath = writeSession(`2026/04/18/rollout-graph-${sessionId}.jsonl`, [
+      {
+        timestamp: '2026-04-18T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-18T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/graph-connectors',
+          source: 'vscode',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-18T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'before empty connector' },
+      },
+    ]);
+    const connectorPath = writeSession(
+      `2026/04/18/rollout-graph-${sessionId}_${connectorId}.jsonl`,
+      [{
+        timestamp: '2026-04-18T00:02:00.000Z',
+        ordinal: 2,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-18T00:02:00.000Z',
+          cwd: '/Users/test/Desktop/graph-connectors',
+          source: 'vscode',
+          history_mode: 'paginated',
+          history_base: { thread_id: sessionId, end_ordinal_exclusive: 2 },
+        },
+      }],
+    );
+    const latestPath = writeSession(
+      `2026/04/18/rollout-graph-${sessionId}_${latestId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-18T00:03:00.000Z',
+          ordinal: 3,
+          type: 'session_meta',
+          payload: {
+            id: sessionId,
+            timestamp: '2026-04-18T00:03:00.000Z',
+            cwd: '/Users/test/Desktop/graph-connectors',
+            source: 'vscode',
+            history_mode: 'paginated',
+            history_base: { thread_id: connectorId, end_ordinal_exclusive: 3 },
+          },
+        },
+        {
+          timestamp: '2026-04-18T00:04:00.000Z',
+          ordinal: 4,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'after empty connector' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ threadNames: new Map() });
+      const connector = sessions.find(session => session.filePath === connectorPath);
+      connector._excludeFromList = true;
+      updateSessionCacheRecord(sessions, connector);
+      sessions.splice(sessions.indexOf(connector), 1);
+      attachSessionRolloutFiles(sessions);
+      flushSessionCache(sessions);
+
+      const latest = sessions.find(session => session.filePath === latestPath);
+      loadSessionDetail(latest);
+      assert.deepEqual(latest.userMessages, [
+        'before empty connector',
+        'after empty connector',
+      ]);
+
+      const reloaded = loadAllSessions({ threadNames: new Map() });
+      assert.ok(!reloaded.some(session => session.filePath === connectorPath));
+      const reloadedLatest = reloaded.find(session => session.filePath === latestPath);
+      loadSessionDetail(reloadedLatest);
+      assert.deepEqual(reloadedLatest.userMessages, [
+        'before empty connector',
+        'after empty connector',
+      ]);
+    } finally {
+      fs.unlinkSync(rootPath);
+      fs.unlinkSync(connectorPath);
+      fs.unlinkSync(latestPath);
     }
   });
 
