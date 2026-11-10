@@ -691,6 +691,15 @@ function getEntryTimestamp(entry) {
   return null;
 }
 
+function getForkOrdinalExclusive(payload = {}) {
+  if (Number.isInteger(payload.forked_from_ordinal_exclusive)) {
+    return payload.forked_from_ordinal_exclusive;
+  }
+  return Number.isInteger(payload.history_base?.end_ordinal_exclusive)
+    ? payload.history_base.end_ordinal_exclusive
+    : null;
+}
+
 function getLineTimestamp(line) {
   const head = line.substring(0, 4096);
   const typeIndex = head.search(/"type"\s*:/);
@@ -762,7 +771,7 @@ function attachSessionRolloutFiles(sessions) {
       if (!Number.isInteger(rollout.forkedFromOrdinalExclusive)) {
         rollout.forkedFromOrdinalExclusive = groupForkedFromOrdinal ?? null;
       }
-      rollout.hasEmbeddedForkHistory = groupHasEmbeddedForkHistory;
+      rollout._hasEmbeddedForkHistory = groupHasEmbeddedForkHistory;
     }
     const previousFilePaths = session.rolloutFilePaths || [session.filePath];
     const nextFilePaths = [...new Set(rollouts.map(rollout => rollout.filePath))]
@@ -809,7 +818,7 @@ function attachSessionRolloutFiles(sessions) {
     while (parentId && !visitedSessionIds.has(parentId)) {
       // Older fork rollouts already contain their inherited conversation, so
       // reaching outside that file would import the same history a second time.
-      if (descendant.hasEmbeddedForkHistory) break;
+      if (descendant._hasEmbeddedForkHistory ?? descendant.hasEmbeddedForkHistory) break;
       visitedSessionIds.add(parentId);
       const parent = representativeBySessionId.get(parentId);
       const forkTimestamp = descendant.rolloutFirstTs
@@ -911,9 +920,7 @@ function loadSessionQuick(filePath, options = {}) {
     source = payload.source || '';
     originator = payload.originator || '';
     forkedFromId = payload.forked_from_id || '';
-    forkedFromOrdinalExclusive = Number.isInteger(payload.forked_from_ordinal_exclusive)
-      ? payload.forked_from_ordinal_exclusive
-      : null;
+    forkedFromOrdinalExclusive = getForkOrdinalExclusive(payload);
     threadSource = payload.thread_source || '';
   }
 
@@ -1066,11 +1073,9 @@ function loadSessionDetail(session) {
           session.source = payload.source || session.source;
           session.originator = payload.originator || session.originator;
           session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
-          session.forkedFromOrdinalExclusive = Number.isInteger(
-            payload.forked_from_ordinal_exclusive,
-          )
-            ? payload.forked_from_ordinal_exclusive
-            : session.forkedFromOrdinalExclusive ?? null;
+          session.forkedFromOrdinalExclusive = getForkOrdinalExclusive(payload)
+            ?? session.forkedFromOrdinalExclusive
+            ?? null;
           session.threadSource = payload.thread_source || session.threadSource || '';
         }
 

@@ -855,17 +855,53 @@ describe('session parsing', () => {
         payload: { type: 'user_message', message: 'legacy child request' },
       },
     ]);
+    const continuationPath = writeSession('2026/04/15/rollout-legacy-child-continuation.jsonl', [
+      {
+        timestamp: '2026-04-15T02:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-child',
+          forked_from_id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T02:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+        },
+      },
+      {
+        timestamp: '2026-04-15T02:01:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'legacy child continuation' },
+      },
+    ]);
 
     try {
       const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
       const child = sessions.find(session => session.sessionId === 'legacy-fork-child');
-      assert.equal(child.hasEmbeddedForkHistory, true);
+      assert.equal(child.hasEmbeddedForkHistory, false, 'the representative is the continuation');
+      assert.equal(child._hasEmbeddedForkHistory, true);
       assert.deepEqual(child._inheritedRolloutGroups, []);
       loadSessionDetail(child);
-      assert.deepEqual(child.userMessages, ['embedded parent request', 'legacy child request']);
+      assert.deepEqual(child.userMessages, [
+        'embedded parent request',
+        'legacy child request',
+        'legacy child continuation',
+      ]);
+
+      const sessionsWithoutEmbeddedRollout = sessions.filter(session => (
+        session.filePath !== childPath
+      ));
+      attachSessionRolloutFiles(sessionsWithoutEmbeddedRollout);
+      assert.equal(child._hasEmbeddedForkHistory, false);
+      assert.equal(child._inheritedRolloutGroups.length, 1);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'embedded parent request',
+        'legacy child continuation',
+      ]);
     } finally {
       fs.unlinkSync(parentPath);
       fs.unlinkSync(childPath);
+      fs.unlinkSync(continuationPath);
     }
   });
 
@@ -1096,7 +1132,7 @@ describe('session parsing', () => {
         payload: {
           id: 'fork-child',
           forked_from_id: 'fork-parent',
-          forked_from_ordinal_exclusive: 42,
+          history_base: { end_ordinal_exclusive: 42 },
           timestamp: '2026-04-13T04:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-child',
           source: 'cli',
