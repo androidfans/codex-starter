@@ -955,6 +955,158 @@ describe('session parsing', () => {
     }
   });
 
+  it('follows the physical parent history chain instead of sibling resumes', () => {
+    const parentId = '11111111-1111-7111-8111-111111111111';
+    const chosenThreadId = '22222222-2222-7222-8222-222222222222';
+    const siblingThreadId = '33333333-3333-7333-8333-333333333333';
+    const childId = '44444444-4444-7444-8444-444444444444';
+    const childContinuationThreadId = '55555555-5555-7555-8555-555555555555';
+    const parentPath = writeSession(`2026/04/16/rollout-2026-04-16T08-00-00-${parentId}.jsonl`, [
+      {
+        timestamp: '2026-04-16T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: parentId,
+          timestamp: '2026-04-16T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/physical-fork',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-16T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'physical parent request' },
+      },
+    ]);
+    const chosenPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T09-00-00-${parentId}_${chosenThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T01:00:00.000Z',
+          ordinal: 2,
+          type: 'session_meta',
+          payload: {
+            id: parentId,
+            timestamp: '2026-04-16T01:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: parentId, end_ordinal_exclusive: 2 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T01:01:00.000Z',
+          ordinal: 3,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'chosen parent continuation' },
+        },
+      ],
+    );
+    const siblingPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T10-00-00-${parentId}_${siblingThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T02:00:00.000Z',
+          ordinal: 2,
+          type: 'session_meta',
+          payload: {
+            id: parentId,
+            timestamp: '2026-04-16T02:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: parentId, end_ordinal_exclusive: 2 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T02:01:00.000Z',
+          ordinal: 3,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'unrelated sibling continuation' },
+        },
+      ],
+    );
+    const childPath = writeSession(`2026/04/16/rollout-2026-04-16T11-00-00-${childId}.jsonl`, [
+      {
+        timestamp: '2026-04-16T03:00:00.000Z',
+        ordinal: 4,
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          forked_from_id: parentId,
+          forked_from_ordinal_exclusive: 4,
+          timestamp: '2026-04-16T03:00:00.000Z',
+          cwd: '/Users/test/Desktop/physical-fork',
+          source: 'vscode',
+          history_base: { thread_id: chosenThreadId, end_ordinal_exclusive: 4 },
+        },
+      },
+      {
+        timestamp: '2026-04-16T03:01:00.000Z',
+        ordinal: 5,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'physical child request' },
+      },
+    ]);
+    const childContinuationPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T12-00-00-${childId}_${childContinuationThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T04:00:00.000Z',
+          ordinal: 6,
+          type: 'session_meta',
+          payload: {
+            id: childId,
+            forked_from_id: parentId,
+            timestamp: '2026-04-16T04:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: childId, end_ordinal_exclusive: 6 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T04:01:00.000Z',
+          ordinal: 7,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'physical child continuation' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === childId);
+      assert.deepEqual(child._inheritedRolloutGroups[0].filePaths, [parentPath, chosenPath]);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'physical parent request',
+        'chosen parent continuation',
+        'physical child request',
+        'physical child continuation',
+      ]);
+      assert.ok(!child.userMessages.includes('unrelated sibling continuation'));
+
+      fs.unlinkSync(childPath);
+      const reloadedSessions = loadAllSessions({ threadNames: new Map() });
+      const reloadedChild = reloadedSessions.find(session => session.sessionId === childId);
+      assert.equal(reloadedChild.forkedFromOrdinalExclusive, 4);
+      assert.equal(reloadedChild.parentHistoryThreadId, chosenThreadId);
+      loadSessionDetail(reloadedChild);
+      assert.deepEqual(reloadedChild.userMessages, [
+        'physical parent request',
+        'chosen parent continuation',
+        'physical child continuation',
+      ]);
+      assert.ok(!reloadedChild.userMessages.includes('unrelated sibling continuation'));
+    } finally {
+      fs.unlinkSync(parentPath);
+      fs.unlinkSync(chosenPath);
+      fs.unlinkSync(siblingPath);
+      if (fs.existsSync(childPath)) fs.unlinkSync(childPath);
+      fs.unlinkSync(childContinuationPath);
+    }
+  });
+
   it('preserves a legitimate repeated first turn in a timestamp-less resume', () => {
     const firstPath = writeSession('2026/04/08/rollout-2026-04-08T01-00-00-repeat.jsonl', [
       { type: 'event_msg', payload: { type: 'user_message', message: 'retry' } },
@@ -1738,7 +1890,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 2);
+    assert.equal(rebuilt.version, 3);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });
