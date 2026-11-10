@@ -726,6 +726,15 @@ function walkSessionFiles(dir) {
   return results;
 }
 
+function invalidateSessionDetail(session) {
+  if (!session._detailLoaded) return;
+  session._detailLoaded = false;
+  delete session.userMessages;
+  delete session.assistantSnippets;
+  delete session.totalMessages;
+  delete session.toolsUsed;
+}
+
 function attachSessionRolloutFiles(sessions) {
   const rolloutsBySessionId = new Map();
   for (const session of sessions) {
@@ -763,14 +772,48 @@ function attachSessionRolloutFiles(sessions) {
       session.firstTs = session._rolloutFileFirstTs;
       session.lastTs = session._rolloutFileLastTs;
       session.duration = formatDuration(session.firstTs, session.lastTs);
-      if (session._detailLoaded) {
-        session._detailLoaded = false;
-        delete session.userMessages;
-        delete session.assistantSnippets;
-        delete session.totalMessages;
-        delete session.toolsUsed;
-      }
+      invalidateSessionDetail(session);
     }
+  }
+
+  const representativeBySessionId = new Map();
+  for (const session of sessions) {
+    if (session.sessionId && !representativeBySessionId.has(session.sessionId)) {
+      representativeBySessionId.set(session.sessionId, session);
+    }
+  }
+
+  for (const session of sessions) {
+    const inheritedRolloutGroups = [];
+    const visitedSessionIds = new Set([session.sessionId]);
+    let descendant = session;
+    let parentId = descendant.forkedFromId;
+
+    // Newer Codex forks keep only the parent UUID in the child rollout. Walk
+    // the available parent chain and retain an edge-specific cutoff so later
+    // work on an ancestor branch never leaks into the selected conversation.
+    while (parentId && !visitedSessionIds.has(parentId)) {
+      visitedSessionIds.add(parentId);
+      const parent = representativeBySessionId.get(parentId);
+      const forkTimestamp = descendant.rolloutFirstTs
+        || descendant._rolloutFileFirstTs
+        || descendant.firstTs;
+      if (!parent || !forkTimestamp) break;
+
+      inheritedRolloutGroups.push({
+        sessionId: parent.sessionId,
+        filePaths: [...(parent.rolloutFilePaths || [parent.filePath])],
+        beforeTimestamp: forkTimestamp,
+      });
+      descendant = parent;
+      parentId = parent.forkedFromId;
+    }
+
+    inheritedRolloutGroups.reverse();
+    const previousSignature = JSON.stringify(session._inheritedRolloutGroups || []);
+    const nextSignature = JSON.stringify(inheritedRolloutGroups);
+    session._inheritedRolloutGroups = inheritedRolloutGroups;
+    if (previousSignature !== nextSignature) invalidateSessionDetail(session);
   }
   return sessions;
 }
@@ -923,9 +966,22 @@ function loadSessionDetail(session) {
   const sourceOrderedRecords = [];
   const timestampedRecordSources = new Map();
   const toolsUsed = new Set();
-  const filePaths = (session.rolloutFilePaths || [session.filePath])
-    .filter(filePath => filePath && fs.existsSync(filePath))
-    .sort((a, b) => a.localeCompare(b));
+  const inheritedSources = (session._inheritedRolloutGroups || []).flatMap(group => {
+    const beforeTime = new Date(group.beforeTimestamp).getTime();
+    if (!Number.isFinite(beforeTime)) return [];
+    return group.filePaths.map(filePath => ({
+      filePath,
+      beforeTime,
+      isLocal: false,
+    }));
+  });
+  const localSources = (session.rolloutFilePaths || [session.filePath]).map(filePath => ({
+    filePath,
+    beforeTime: null,
+    isLocal: true,
+  }));
+  const sources = [...inheritedSources, ...localSources]
+    .filter(source => source.filePath && fs.existsSync(source.filePath));
   let canonicalMetaLoaded = false;
 
   function recordKey(record) {
@@ -945,7 +1001,8 @@ function loadSessionDetail(session) {
     return new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`).getTime();
   }
 
-  filePaths.forEach((filePath, fileIndex) => {
+  sources.forEach((source, fileIndex) => {
+    const { filePath, beforeTime, isLocal } = source;
     const fileRecords = [];
     let fileAnchorTime = fileNameTimestamp(filePath);
     let lineIndex = 0;
@@ -987,6 +1044,7 @@ function loadSessionDetail(session) {
             isTurnBoundary,
             timestamp: timestamp || '',
             timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+            beforeTime,
             fileIndex,
             lineIndex,
           };
@@ -1006,7 +1064,7 @@ function loadSessionDetail(session) {
           }
         }
 
-        if (entry.type === 'response_item') {
+        if (isLocal && entry.type === 'response_item') {
           if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
         }
         const titleUpdate = getCustomTitleUpdate(entry);
@@ -1032,6 +1090,9 @@ function loadSessionDetail(session) {
     }
 
     for (const record of fileRecords) {
+      // The cutoff belongs to this exact ancestor edge. A grandparent stops at
+      // the parent fork, while the parent can contribute until the child fork.
+      if (record.beforeTime !== null && record.sortTime >= record.beforeTime) continue;
       // Content equality cannot distinguish a timestamp-less history replay
       // from an intentional retry, so preserve it rather than lose a turn.
       const key = record.timestamp ? recordKey(record) : '';
@@ -1081,7 +1142,9 @@ function loadSessionDetail(session) {
   }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
-  if (userMessages.length > 0) session.topic = trimTopic(userMessages[0]) || session.topic;
+  if (userMessages.length > 0 && inheritedSources.length === 0) {
+    session.topic = trimTopic(userMessages[0]) || session.topic;
+  }
   return session;
 }
 
