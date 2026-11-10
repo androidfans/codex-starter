@@ -620,6 +620,8 @@ describe('session parsing', () => {
       ));
       loadSessionDetail(session);
       assert.deepEqual(session.userMessages, ['second current fragment']);
+      assert.equal(session.firstTs, '2026-04-12T00:02:00.000Z');
+      assert.equal(session.lastTs, '2026-04-12T00:03:00.000Z');
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuationPath);

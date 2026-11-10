@@ -904,6 +904,11 @@ function attachSessionRolloutFiles(sessions) {
       .filter(Boolean)
       .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
       || session.firstTs;
+    session._selectedRolloutLastTs = selectedRollouts
+      .map(rollout => rollout._rolloutFileLastTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+      || session.lastTs;
   }
 
   const representativeBySessionId = new Map();
@@ -1382,14 +1387,16 @@ function loadSessionDetail(session) {
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
-  if (session.rolloutFirstTs
-      && new Date(session.rolloutFirstTs).getTime()
+  const selectedFirstTs = session._selectedRolloutFirstTs || session.rolloutFirstTs;
+  const selectedLastTs = session._selectedRolloutLastTs || session.rolloutLastTs;
+  if (selectedFirstTs
+      && new Date(selectedFirstTs).getTime()
         < (session.firstTs ? new Date(session.firstTs).getTime() : Infinity)) {
-    session.firstTs = session.rolloutFirstTs;
+    session.firstTs = selectedFirstTs;
   }
-  if (session.rolloutLastTs
-      && new Date(session.rolloutLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
-    session.lastTs = session.rolloutLastTs;
+  if (selectedLastTs
+      && new Date(selectedLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
+    session.lastTs = selectedLastTs;
   }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
