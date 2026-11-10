@@ -566,7 +566,7 @@ describe('session parsing', () => {
     }
   });
 
-  it('merges current paginated ordinal fragments without physical links', () => {
+  it('keeps current unlinked physical rollouts separate', () => {
     const sessionId = '99999999-9999-7999-8999-999999999999';
     const continuationId = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
     const firstPath = writeSession(`2026/04/12/rollout-current-${sessionId}.jsonl`, [
@@ -619,10 +619,7 @@ describe('session parsing', () => {
         candidate.sessionId === sessionId && candidate.filePath === continuationPath
       ));
       loadSessionDetail(session);
-      assert.deepEqual(session.userMessages, [
-        'first current fragment',
-        'second current fragment',
-      ]);
+      assert.deepEqual(session.userMessages, ['second current fragment']);
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuationPath);
@@ -2021,7 +2018,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 4);
+    assert.equal(rebuilt.version, 3);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });
