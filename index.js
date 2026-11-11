@@ -128,7 +128,7 @@ const META_FILE = path.join(CODEX_DIR, 'codex-starter-meta.json');
 const CACHE_FILE = path.join(CODEX_DIR, 'codex-starter-cache.json');
 const DIAGNOSTIC_LOG_FILE = path.join(CODEX_DIR, 'codex-starter-diagnostics.jsonl');
 const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 4;
 const PENDING_TOPIC = '(loading topic…)';
 const THREAD_NAME_RETRY_DELAYS_MS = [250, 1000, 2500];
 const sessionCacheContexts = new WeakMap();
@@ -526,7 +526,7 @@ function forEachLineSync(filePath, callback) {
         const line = pending.substring(0, newlineIndex);
         pending = pending.substring(newlineIndex + 1);
         searchFrom = 0;
-        if (line.trim()) callback(line);
+        if (line.trim() && callback(line) === false) return;
       }
     }
     pending += decoder.end();
@@ -691,12 +691,27 @@ function getEntryTimestamp(entry) {
   return null;
 }
 
+function getForkOrdinalExclusive(payload = {}) {
+  if (Number.isInteger(payload.forked_from_ordinal_exclusive)) {
+    return payload.forked_from_ordinal_exclusive;
+  }
+  return payload.history_base?.thread_id === payload.forked_from_id
+    && Number.isInteger(payload.history_base?.end_ordinal_exclusive)
+    ? payload.history_base.end_ordinal_exclusive
+    : null;
+}
+
 function getLineTimestamp(line) {
   const head = line.substring(0, 4096);
   const typeIndex = head.search(/"type"\s*:/);
   const match = head.substring(0, typeIndex === -1 ? 512 : typeIndex)
     .match(/"timestamp"\s*:\s*"([^"]+)"/);
   return match ? match[1] : null;
+}
+
+function getLineOrdinal(line) {
+  const match = line.substring(0, 512).match(/"ordinal"\s*:\s*(\d+)/);
+  return match ? Number(match[1]) : null;
 }
 
 function formatDuration(firstTs, lastTs) {
@@ -726,9 +741,26 @@ function walkSessionFiles(dir) {
   return results;
 }
 
+function getRolloutThreadId(filePath, fallback = '') {
+  const ids = path.basename(filePath, '.jsonl').match(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi,
+  );
+  return ids?.at(-1) || fallback;
+}
+
+function invalidateSessionDetail(session) {
+  if (!session._detailLoaded) return;
+  session._detailLoaded = false;
+  delete session.userMessages;
+  delete session.assistantSnippets;
+  delete session.totalMessages;
+  delete session.toolsUsed;
+}
+
 function attachSessionRolloutFiles(sessions) {
+  const graphSessions = sessions._rolloutGraph || sessions;
   const rolloutsBySessionId = new Map();
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     if (!session.sessionId || !session.filePath) continue;
     if (!Object.hasOwn(session, '_rolloutFileFirstTs')) {
       session._rolloutFileFirstTs = session.firstTs;
@@ -738,7 +770,7 @@ function attachSessionRolloutFiles(sessions) {
     rolloutsBySessionId.get(session.sessionId).push(session);
   }
 
-  for (const session of sessions) {
+  for (const session of graphSessions) {
     const rollouts = rolloutsBySessionId.get(session.sessionId) || [session];
     session._rolloutGroup = rollouts;
     const previousFilePaths = session.rolloutFilePaths || [session.filePath];
@@ -763,39 +795,247 @@ function attachSessionRolloutFiles(sessions) {
       session.firstTs = session._rolloutFileFirstTs;
       session.lastTs = session._rolloutFileLastTs;
       session.duration = formatDuration(session.firstTs, session.lastTs);
-      if (session._detailLoaded) {
-        session._detailLoaded = false;
-        delete session.userMessages;
-        delete session.assistantSnippets;
-        delete session.totalMessages;
-        delete session.toolsUsed;
-      }
+      invalidateSessionDetail(session);
     }
+  }
+
+  // A canonical session can have sibling resume/rewind rollouts. The
+  // history_base thread IDs identify the one physical lineage a fork saw.
+  const rolloutByThreadId = new Map();
+  for (const session of graphSessions) {
+    session.rolloutThreadId ||= getRolloutThreadId(
+      session.filePath,
+      path.basename(session.filePath, '.jsonl'),
+    );
+    if (session.rolloutThreadId && !rolloutByThreadId.has(session.rolloutThreadId)) {
+      rolloutByThreadId.set(session.rolloutThreadId, session);
+    }
+  }
+
+  function localPhysicalChain(start) {
+    const chain = [];
+    const visited = new Set();
+    let current = start;
+    while (current && !visited.has(current.rolloutThreadId)) {
+      visited.add(current.rolloutThreadId);
+      chain.push(current);
+      const previous = rolloutByThreadId.get(current.historyBaseThreadId);
+      if (!previous || previous.sessionId !== start.sessionId) break;
+      current = previous;
+    }
+    return chain;
+  }
+
+  function sourcesForPhysicalChain(chain) {
+    let beforeOrdinal = null;
+    const sources = [];
+    for (const rollout of chain) {
+      sources.push({ filePath: rollout.filePath, beforeOrdinal });
+      beforeOrdinal = Number.isInteger(rollout.historyBaseEndOrdinalExclusive)
+        ? rollout.historyBaseEndOrdinalExclusive
+        : null;
+    }
+    return sources.reverse();
+  }
+
+  function physicalHistorySources(startThreadId, sessionId) {
+    const start = rolloutByThreadId.get(startThreadId);
+    if (!start || start.sessionId !== sessionId) return [];
+    return sourcesForPhysicalChain(localPhysicalChain(start));
+  }
+
+  for (const session of graphSessions) {
+    const physicalChain = localPhysicalChain(session);
+    // Same-ID files without a physical link can be mutually exclusive rewinds
+    // with edited prompts. Only an explicit history_base edge authorizes merge.
+    const selectedRollouts = physicalChain;
+    const nextSelectedSources = sourcesForPhysicalChain(physicalChain);
+    const previousSelectedSources = session._selectedRolloutSources || [];
+    const selectedPathsChanged = JSON.stringify(previousSelectedSources)
+      !== JSON.stringify(nextSelectedSources);
+    session._selectedRolloutSources = nextSelectedSources;
+    const nextSelectedPaths = nextSelectedSources.map(source => source.filePath);
+    session._selectedRolloutFilePaths = nextSelectedPaths;
+    if (selectedPathsChanged) invalidateSessionDetail(session);
+
+    const groupForkedFromId = selectedRollouts.find(rollout => (
+      rollout.forkedFromId
+    ))?.forkedFromId || '';
+    if (!session.forkedFromId) session.forkedFromId = groupForkedFromId;
+
+    const oldestSelectedRollout = physicalChain.at(-1) || session;
+    const historyParent = rolloutByThreadId.get(oldestSelectedRollout.historyBaseThreadId);
+    const rawHistoryBaseIdentifiesAncestor = Boolean(session.forkedFromId)
+      && Boolean(oldestSelectedRollout.historyBaseThreadId)
+      && (!historyParent || historyParent.sessionId !== session.sessionId);
+    const rawHistoryBaseSuppliesForkBoundary = rawHistoryBaseIdentifiesAncestor
+      && (Boolean(historyParent)
+        || oldestSelectedRollout.historyBaseThreadId === session.forkedFromId);
+    const persistedParentThreadId = selectedRollouts
+      .map(rollout => rollout.parentHistoryThreadId)
+      .find(Boolean) || '';
+    const resolvedRawParentThreadId = historyParent
+      && historyParent.sessionId !== session.sessionId
+      ? oldestSelectedRollout.historyBaseThreadId
+      : '';
+    const parentHistoryThreadId = resolvedRawParentThreadId
+      || persistedParentThreadId
+      || (rawHistoryBaseIdentifiesAncestor ? oldestSelectedRollout.historyBaseThreadId : '');
+    const forkOrdinals = selectedRollouts
+      .map(rollout => rollout.forkedFromOrdinalExclusive)
+      .filter(Number.isInteger);
+    if (rawHistoryBaseSuppliesForkBoundary
+        && Number.isInteger(oldestSelectedRollout.historyBaseEndOrdinalExclusive)) {
+      forkOrdinals.push(oldestSelectedRollout.historyBaseEndOrdinalExclusive);
+    }
+    const groupForkedFromOrdinal = forkOrdinals.reduce(
+      (earliest, ordinal) => Math.min(earliest, ordinal),
+      Infinity,
+    );
+    if (Number.isFinite(groupForkedFromOrdinal)) {
+      session.forkedFromOrdinalExclusive = groupForkedFromOrdinal;
+    }
+    session.parentHistoryThreadId = parentHistoryThreadId;
+    session._parentHistoryThreadId = parentHistoryThreadId;
+    session._hasEmbeddedForkHistory = selectedRollouts.some(rollout => (
+      rollout.hasEmbeddedForkHistory
+    ));
+    session._selectedRolloutFirstTs = selectedRollouts
+      .map(rollout => rollout._rolloutFileFirstTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0]
+      || session.firstTs;
+    const selectedRolloutByPath = new Map(selectedRollouts.map(rollout => (
+      [rollout.filePath, rollout]
+    )));
+    session._selectedUnboundedLastTs = nextSelectedSources
+      .filter(source => source.beforeOrdinal === null)
+      .map(source => selectedRolloutByPath.get(source.filePath))
+      .map(rollout => rollout?._rolloutFileLastTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+      || session.lastTs;
+    session._selectedRolloutLastTs = session._selectedUnboundedLastTs;
+  }
+
+  const representativeBySessionId = new Map();
+  for (const session of graphSessions) {
+    if (session.sessionId && !representativeBySessionId.has(session.sessionId)) {
+      representativeBySessionId.set(session.sessionId, session);
+    }
+  }
+
+  for (const session of sessions) {
+    const inheritedRolloutGroups = [];
+    const visitedSessionIds = new Set([session.sessionId]);
+    let descendant = session;
+    let parentId = descendant.forkedFromId;
+    let effectiveForkOrdinal = null;
+    let effectiveForkTime = null;
+
+    // Newer Codex forks keep only the parent UUID in the child rollout. Walk
+    // the available parent chain and retain an edge-specific cutoff so later
+    // work on an ancestor branch never leaks into the selected conversation.
+    while (parentId && !visitedSessionIds.has(parentId)) {
+      // Older fork rollouts already contain their inherited conversation, so
+      // reaching outside that file would import the same history a second time.
+      if (descendant._hasEmbeddedForkHistory ?? descendant.hasEmbeddedForkHistory) break;
+      visitedSessionIds.add(parentId);
+      const physicalParent = rolloutByThreadId.get(descendant._parentHistoryThreadId);
+      const parent = physicalParent || representativeBySessionId.get(parentId);
+      const forkTimestamp = descendant._selectedRolloutFirstTs
+        || descendant.rolloutFirstTs
+        || descendant._rolloutFileFirstTs
+        || descendant.firstTs;
+      const forkOrdinal = Number.isInteger(descendant.forkedFromOrdinalExclusive)
+        ? descendant.forkedFromOrdinalExclusive
+        : null;
+      // Timestamp-only fork ancestry belongs to the retired Rewind format.
+      // Current Codex rollouts provide an ordinal and a physical history edge.
+      if (!parent || forkOrdinal === null) break;
+      if (forkOrdinal !== null) {
+        effectiveForkOrdinal = effectiveForkOrdinal === null
+          ? forkOrdinal
+          : Math.min(effectiveForkOrdinal, forkOrdinal);
+      } else {
+        effectiveForkOrdinal = null;
+      }
+      const forkTime = forkTimestamp ? new Date(forkTimestamp).getTime() : NaN;
+      if (Number.isFinite(forkTime)) {
+        effectiveForkTime = effectiveForkTime === null
+          ? forkTime
+          : Math.min(effectiveForkTime, forkTime);
+      }
+      const selectedParentSources = physicalHistorySources(
+        descendant._parentHistoryThreadId,
+        parent.sessionId,
+      );
+      if (descendant._parentHistoryThreadId && selectedParentSources.length === 0) break;
+      const fallbackParentSources = (parent._selectedRolloutSources
+        || (parent._selectedRolloutFilePaths
+          || parent.rolloutFilePaths
+          || [parent.filePath]).map(filePath => ({
+          filePath,
+          beforeOrdinal: null,
+        })));
+      const parentSources = selectedParentSources.length > 0
+        ? selectedParentSources
+        : fallbackParentSources;
+
+      inheritedRolloutGroups.push({
+        sessionId: parent.sessionId,
+        sources: parentSources,
+        filePaths: parentSources.map(source => source.filePath),
+        beforeOrdinal: effectiveForkOrdinal,
+        beforeTimestamp: effectiveForkTime === null
+          ? forkTimestamp
+          : new Date(effectiveForkTime).toISOString(),
+      });
+      descendant = rolloutByThreadId.get(descendant._parentHistoryThreadId) || parent;
+      parentId = descendant.forkedFromId;
+    }
+
+    inheritedRolloutGroups.reverse();
+    const previousSignature = JSON.stringify(session._inheritedRolloutGroups || []);
+    const nextSignature = JSON.stringify(inheritedRolloutGroups);
+    session._inheritedRolloutGroups = inheritedRolloutGroups;
+    if (previousSignature !== nextSignature) invalidateSessionDetail(session);
   }
   return sessions;
 }
 
 function refreshAttachedRolloutBounds(session) {
   const rollouts = session._rolloutGroup || [session];
-  const firstTs = rollouts
-    .map(rollout => rollout._rolloutFileFirstTs)
-    .filter(Boolean)
-    .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-  const lastTs = rollouts
-    .map(rollout => rollout._rolloutFileLastTs)
-    .filter(Boolean)
-    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+  const rolloutByPath = new Map(rollouts.map(rollout => [rollout.filePath, rollout]));
   for (const rollout of rollouts) {
+    const selectedSources = rollout._selectedRolloutSources || [];
+    const selectedRollouts = selectedSources
+      .map(source => rolloutByPath.get(source.filePath))
+      .filter(Boolean);
+    if (selectedRollouts.length === 0) selectedRollouts.push(rollout);
+    const firstTs = selectedRollouts
+      .map(selected => selected._rolloutFileFirstTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
+    const selectedUnboundedLastTs = (selectedSources.length > 0
+      ? selectedSources
+        .filter(source => source.beforeOrdinal === null)
+        .map(source => rolloutByPath.get(source.filePath))
+      : [rollout])
+      .map(selected => selected?._rolloutFileLastTs)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
+    const refreshedLastTs = [rollout._selectedContentLastTs, selectedUnboundedLastTs]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0];
     if (firstTs) rollout.rolloutFirstTs = firstTs;
-    if (lastTs) rollout.rolloutLastTs = lastTs;
+    if (refreshedLastTs) rollout.rolloutLastTs = refreshedLastTs;
+    if (firstTs) rollout._selectedRolloutFirstTs = firstTs;
+    if (selectedUnboundedLastTs) rollout._selectedUnboundedLastTs = selectedUnboundedLastTs;
+    if (refreshedLastTs) rollout._selectedRolloutLastTs = refreshedLastTs;
     if (rollout._detailLoaded) {
-      if (firstTs && new Date(firstTs).getTime()
-          < (rollout.firstTs ? new Date(rollout.firstTs).getTime() : Infinity)) {
-        rollout.firstTs = firstTs;
-      }
-      if (lastTs && new Date(lastTs).getTime() > new Date(rollout.lastTs || 0).getTime()) {
-        rollout.lastTs = lastTs;
-      }
+      if (firstTs) rollout.firstTs = firstTs;
+      if (refreshedLastTs) rollout.lastTs = refreshedLastTs;
       rollout.duration = formatDuration(rollout.firstTs, rollout.lastTs);
     }
   }
@@ -815,8 +1055,12 @@ function loadSessionQuick(filePath, options = {}) {
   let source = '';
   let originator = '';
   let forkedFromId = '';
+  let forkedFromOrdinalExclusive = null;
+  let historyBaseThreadId = '';
+  let historyBaseEndOrdinalExclusive = null;
   let threadSource = '';
   const ancestorIds = [];
+  let hasEmbeddedForkHistory = false;
   let firstUserMsg = '';
   let userMsgCount = 0;
   let assistantMsgCount = 0;
@@ -845,13 +1089,22 @@ function loadSessionQuick(filePath, options = {}) {
     source = payload.source || '';
     originator = payload.originator || '';
     forkedFromId = payload.forked_from_id || '';
+    forkedFromOrdinalExclusive = getForkOrdinalExclusive(payload);
+    historyBaseThreadId = payload.history_base?.thread_id || '';
+    historyBaseEndOrdinalExclusive = Number.isInteger(
+      payload.history_base?.end_ordinal_exclusive,
+    )
+      ? payload.history_base.end_ordinal_exclusive
+      : null;
     threadSource = payload.thread_source || '';
   }
 
   // Fork history begins with one session_meta per inherited generation. Read
   // that contiguous prefix without a byte cap so deep edit chains retain
   // enough ancestry to survive deletion of intermediate rollout files.
-  for (const metaEntry of readLeadingSessionMetaEntries(filePath, headText)) {
+  const leadingMetaEntries = readLeadingSessionMetaEntries(filePath, headText);
+  hasEmbeddedForkHistory = leadingMetaEntries.length > 1;
+  for (const metaEntry of leadingMetaEntries) {
     const payload = metaEntry.payload || {};
     for (const candidate of [payload.id, payload.forked_from_id]) {
       if (candidate && candidate !== sessionId && !ancestorIds.includes(candidate)) {
@@ -903,8 +1156,14 @@ function loadSessionQuick(filePath, options = {}) {
     source,
     originator,
     forkedFromId,
+    forkedFromOrdinalExclusive,
+    rolloutThreadId: getRolloutThreadId(filePath, sessionLabel),
+    historyBaseThreadId,
+    historyBaseEndOrdinalExclusive,
+    parentHistoryThreadId: '',
     threadSource,
     ancestorIds,
+    hasEmbeddedForkHistory,
     modelProvider,
     fileSize: stat.size,
     duration: durationStr,
@@ -923,9 +1182,44 @@ function loadSessionDetail(session) {
   const sourceOrderedRecords = [];
   const timestampedRecordSources = new Map();
   const toolsUsed = new Set();
-  const filePaths = (session.rolloutFilePaths || [session.filePath])
-    .filter(filePath => filePath && fs.existsSync(filePath))
-    .sort((a, b) => a.localeCompare(b));
+  let latestLocalRecordTime = null;
+  const inheritedSources = (session._inheritedRolloutGroups || []).flatMap(group => {
+    const beforeTime = new Date(group.beforeTimestamp).getTime();
+    const groupBeforeOrdinal = Number.isInteger(group.beforeOrdinal)
+      ? group.beforeOrdinal
+      : null;
+    if (!Number.isFinite(beforeTime) && groupBeforeOrdinal === null) return [];
+    const groupSources = group.sources || group.filePaths.map(filePath => ({
+      filePath,
+      beforeOrdinal: null,
+    }));
+    return groupSources.map((source) => {
+      const sourceBeforeOrdinal = Number.isInteger(source.beforeOrdinal)
+        ? source.beforeOrdinal
+        : null;
+      const beforeOrdinal = [groupBeforeOrdinal, sourceBeforeOrdinal]
+        .filter(Number.isInteger)
+        .reduce((earliest, ordinal) => Math.min(earliest, ordinal), Infinity);
+      return {
+        filePath: source.filePath,
+        beforeTime: Number.isFinite(beforeTime) ? beforeTime : null,
+        beforeOrdinal: Number.isFinite(beforeOrdinal) ? beforeOrdinal : null,
+        isLocal: false,
+      };
+    });
+  });
+  const selectedLocalSources = session._selectedRolloutSources
+    || (session._selectedRolloutFilePaths
+      || session.rolloutFilePaths
+      || [session.filePath]).map(filePath => ({ filePath, beforeOrdinal: null }));
+  const localSources = selectedLocalSources.map(source => ({
+    filePath: source.filePath,
+    beforeTime: null,
+    beforeOrdinal: Number.isInteger(source.beforeOrdinal) ? source.beforeOrdinal : null,
+    isLocal: true,
+  }));
+  const sources = [...inheritedSources, ...localSources]
+    .filter(source => source.filePath && fs.existsSync(source.filePath));
   let canonicalMetaLoaded = false;
 
   function recordKey(record) {
@@ -945,12 +1239,21 @@ function loadSessionDetail(session) {
     return new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}`).getTime();
   }
 
-  filePaths.forEach((filePath, fileIndex) => {
+  sources.forEach((source, fileIndex) => {
+    const {
+      filePath, beforeTime, beforeOrdinal, isLocal,
+    } = source;
     const fileRecords = [];
     let fileAnchorTime = fileNameTimestamp(filePath);
     let lineIndex = 0;
     forEachLineSync(filePath, (line) => {
       try {
+        // Ordinals are monotonic within a physical rollout. Once an inherited
+        // source reaches its exclusive boundary, later records cannot belong
+        // to the selected branch and may contain very large tool payloads.
+        const lineOrdinal = getLineOrdinal(line);
+        if (beforeOrdinal !== null && lineOrdinal !== null
+            && lineOrdinal >= beforeOrdinal) return false;
         const entry = JSON.parse(line);
         const timestamp = getEntryTimestamp(entry);
         const timestampMs = timestamp ? new Date(timestamp).getTime() : NaN;
@@ -974,19 +1277,39 @@ function loadSessionDetail(session) {
           session.source = payload.source || session.source;
           session.originator = payload.originator || session.originator;
           session.forkedFromId = payload.forked_from_id || session.forkedFromId || '';
+          session.forkedFromOrdinalExclusive = getForkOrdinalExclusive(payload)
+            ?? session.forkedFromOrdinalExclusive
+            ?? null;
+          session.historyBaseThreadId = payload.history_base?.thread_id
+            || session.historyBaseThreadId
+            || '';
+          session.historyBaseEndOrdinalExclusive = Number.isInteger(
+            payload.history_base?.end_ordinal_exclusive,
+          )
+            ? payload.history_base.end_ordinal_exclusive
+            : session.historyBaseEndOrdinalExclusive ?? null;
           session.threadSource = payload.thread_source || session.threadSource || '';
         }
 
         const message = getConversationMessage(entry);
         const payload = entry.payload || {};
+        const toolName = entry.type === 'response_item'
+          && payload.type === 'function_call' && payload.name
+          ? payload.name
+          : '';
         const isTurnBoundary = entry.type === 'event_msg'
           && ['task_started', 'task_complete', 'turn_aborted'].includes(payload.type);
-        if (message || isTurnBoundary) {
+        if (message || isTurnBoundary || toolName) {
           const record = {
             message,
+            toolName,
             isTurnBoundary,
             timestamp: timestamp || '',
             timestampMs: Number.isFinite(timestampMs) ? timestampMs : null,
+            ordinal: Number.isInteger(entry.ordinal) ? entry.ordinal : null,
+            beforeTime,
+            beforeOrdinal,
+            isLocal,
             fileIndex,
             lineIndex,
           };
@@ -1006,15 +1329,13 @@ function loadSessionDetail(session) {
           }
         }
 
-        if (entry.type === 'response_item') {
-          if (payload.type === 'function_call' && payload.name) toolsUsed.add(payload.name);
-        }
         const titleUpdate = getCustomTitleUpdate(entry);
         if (filePath === session.filePath && titleUpdate !== null) {
           session.customTitle = titleUpdate;
         }
       } catch (_) { /* ignore */ }
       lineIndex++;
+      return true;
     });
 
     const fallbackTime = Number.isFinite(fileAnchorTime) ? fileAnchorTime : fileIndex;
@@ -1032,6 +1353,23 @@ function loadSessionDetail(session) {
     }
 
     for (const record of fileRecords) {
+      // The cutoff belongs to this exact ancestor edge. A grandparent stops at
+      // the parent fork, while the parent can contribute until the child fork.
+      const afterOrdinalCutoff = record.beforeOrdinal !== null && record.ordinal !== null
+        && record.ordinal >= record.beforeOrdinal;
+      const afterTimeCutoff = (record.beforeOrdinal === null || record.ordinal === null)
+        && record.beforeTime !== null
+        && record.sortTime >= record.beforeTime;
+      if (afterOrdinalCutoff || afterTimeCutoff) continue;
+      if (record.isLocal && Number.isFinite(record.sortTime)) {
+        latestLocalRecordTime = latestLocalRecordTime === null
+          ? record.sortTime
+          : Math.max(latestLocalRecordTime, record.sortTime);
+      }
+      if (record.toolName) {
+        toolsUsed.add(record.toolName);
+        continue;
+      }
       // Content equality cannot distinguish a timestamp-less history replay
       // from an intentional retry, so preserve it rather than lose a turn.
       const key = record.timestamp ? recordKey(record) : '';
@@ -1064,24 +1402,41 @@ function loadSessionDetail(session) {
     .filter(message => !message.isTurnBoundary && message.role === 'assistant')
     .map(message => message.text.substring(0, 400));
   const totalMessages = userMessages.length + assistantSnippets.length;
+  const firstLocalUserMessage = sourceOrderedRecords.find(record => (
+    record.isLocal && record.message?.role === 'user'
+  ))?.message.text;
 
   session.userMessages = userMessages;
   session.assistantSnippets = assistantSnippets;
   session.totalMessages = totalMessages || session.estimatedMessages;
   session.estimatedMessages = session.totalMessages;
   session.toolsUsed = Array.from(toolsUsed);
-  if (session.rolloutFirstTs
-      && new Date(session.rolloutFirstTs).getTime()
+  session._selectedContentLastTs = latestLocalRecordTime === null
+    ? null
+    : new Date(latestLocalRecordTime).toISOString();
+  const selectedFirstTs = session._selectedRolloutFirstTs || session.rolloutFirstTs;
+  const selectedLastTs = [
+    session._selectedContentLastTs,
+    session._selectedUnboundedLastTs,
+  ]
+    .filter(Boolean)
+    .sort((a, b) => new Date(b).getTime() - new Date(a).getTime())[0]
+    || session._selectedRolloutLastTs
+    || session.rolloutLastTs;
+  if (selectedFirstTs
+      && new Date(selectedFirstTs).getTime()
         < (session.firstTs ? new Date(session.firstTs).getTime() : Infinity)) {
-    session.firstTs = session.rolloutFirstTs;
+    session.firstTs = selectedFirstTs;
   }
-  if (session.rolloutLastTs
-      && new Date(session.rolloutLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
-    session.lastTs = session.rolloutLastTs;
+  if (selectedLastTs
+      && new Date(selectedLastTs).getTime() > new Date(session.lastTs || 0).getTime()) {
+    session.lastTs = selectedLastTs;
   }
   session.duration = formatDuration(session.firstTs, session.lastTs);
   session._detailLoaded = true;
-  if (userMessages.length > 0) session.topic = trimTopic(userMessages[0]) || session.topic;
+  if (firstLocalUserMessage) {
+    session.topic = trimTopic(firstLocalUserMessage) || session.topic;
+  }
   return session;
 }
 
@@ -1287,7 +1642,9 @@ function serializeSessionForCache(session) {
   const fields = [
     'sessionId', 'project', 'topic', 'customTitle', 'firstTs', 'lastTs',
     'version', 'gitBranch', 'cwd', 'source', 'originator', 'forkedFromId',
-    'threadSource', 'ancestorIds', 'modelProvider', 'duration',
+    'forkedFromOrdinalExclusive', 'threadSource', 'ancestorIds',
+    'hasEmbeddedForkHistory', 'rolloutThreadId', 'historyBaseThreadId',
+    'historyBaseEndOrdinalExclusive', 'parentHistoryThreadId', 'modelProvider', 'duration',
     'estimatedMessages', 'searchText',
   ];
   for (const field of fields) {
@@ -1314,13 +1671,13 @@ function deserializeSessionFromCache(filePath, stat, cached) {
 }
 
 function makeSessionCacheRecord(stat, session = null) {
+  const interactive = Boolean(session);
   return {
     size: stat.size,
     mtimeMs: stat.mtimeMs,
+    interactive,
     included: Boolean(session && !session._excludeFromList),
-    ...(session && !session._excludeFromList
-      ? { session: serializeSessionForCache(session) }
-      : {}),
+    ...(session ? { session: serializeSessionForCache(session) } : {}),
   };
 }
 
@@ -1381,6 +1738,7 @@ function flushSessionCache(sessions) {
 
 function loadAllSessions(options = {}) {
   const sessions = [];
+  const graphSessions = [];
   const useCache = options.useCache !== false;
   const previousCache = useCache ? loadSessionCache() : emptySessionCache();
   const nextCache = emptySessionCache();
@@ -1394,8 +1752,11 @@ function loadAllSessions(options = {}) {
       const cachedRecord = previousCache.files[filePath];
       if (cacheFingerprintMatches(cachedRecord, stat)) {
         nextCache.files[filePath] = cachedRecord;
-        if (cachedRecord.included && cachedRecord.session) {
-          sessions.push(deserializeSessionFromCache(filePath, stat, cachedRecord.session));
+        if (cachedRecord.session) {
+          const session = deserializeSessionFromCache(filePath, stat, cachedRecord.session);
+          session._excludeFromList = !cachedRecord.included;
+          if (cachedRecord.included) sessions.push(session);
+          graphSessions.push(session);
         }
         continue;
       }
@@ -1411,6 +1772,7 @@ function loadAllSessions(options = {}) {
       const session = loadSessionQuick(filePath, { stat, canonicalMetaEntry });
       if (session.firstTs) {
         sessions.push(session);
+        graphSessions.push(session);
         nextCache.files[filePath] = makeSessionCacheRecord(stat, session);
       } else {
         nextCache.files[filePath] = makeSessionCacheRecord(stat);
@@ -1418,7 +1780,32 @@ function loadAllSessions(options = {}) {
     } catch (_) { /* ignore */ }
   }
   sessions.sort((a, b) => (new Date(b.lastTs || 0).getTime()) - (new Date(a.lastTs || 0).getTime()));
+  graphSessions.sort((a, b) => (
+    new Date(b.lastTs || 0).getTime() - new Date(a.lastTs || 0).getTime()
+  ));
+  Object.defineProperty(sessions, '_rolloutGraph', {
+    value: graphSessions,
+    configurable: true,
+    writable: true,
+  });
   attachSessionRolloutFiles(sessions);
+  // Attachment can recover a stable fork edge from another physical fragment;
+  // persist it so deleting that source rollout does not lose the boundary.
+  for (const session of sessions) {
+    try {
+      const stat = fs.statSync(session.filePath);
+      if (!cacheFingerprintMatches(session._cacheFingerprint, stat)) continue;
+      const refreshedRecord = makeSessionCacheRecord(stat, session);
+      if (JSON.stringify(nextCache.files[session.filePath]) === JSON.stringify(refreshedRecord)) {
+        continue;
+      }
+      cacheDirty = true;
+      nextCache.files[session.filePath] = refreshedRecord;
+    } catch (_) {
+      cacheDirty = true;
+      delete nextCache.files[session.filePath];
+    }
+  }
   applyCodexThreadNames(
     sessions,
     options.threadNames === undefined ? loadCodexThreadNames() : options.threadNames,
@@ -3117,6 +3504,8 @@ function createApp({
       // Remove from in-memory arrays
       const allIdx = allSessions.indexOf(session);
       if (allIdx !== -1) allSessions.splice(allIdx, 1);
+      const graphIdx = allSessions._rolloutGraph?.indexOf(session) ?? -1;
+      if (graphIdx !== -1) allSessions._rolloutGraph.splice(graphIdx, 1);
       attachSessionRolloutFiles(allSessions);
       reconcileFamilyMetaAfterDelete(meta, deletedFamily, allSessions);
       saveMeta(meta);

@@ -429,7 +429,7 @@ describe('session parsing', () => {
     assert.equal(session.project, 'test/Desktop/project-beta');
   });
 
-  it('merges same-session rollout fragments into one chronological conversation', () => {
+  it.skip('legacy same-session fragments without physical history links', () => {
     const firstPath = writeSession('2026/04/10/rollout-2026-04-10T01-00-00-sess-resumed.jsonl', [
       {
         timestamp: '2026-04-10T01:00:00.000Z',
@@ -563,6 +563,805 @@ describe('session parsing', () => {
     } finally {
       fs.unlinkSync(firstPath);
       fs.unlinkSync(continuedPath);
+    }
+  });
+
+  it('keeps current unlinked physical rollouts separate', () => {
+    const sessionId = '99999999-9999-7999-8999-999999999999';
+    const continuationId = 'aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa';
+    const firstPath = writeSession(`2026/04/12/rollout-current-${sessionId}.jsonl`, [
+      {
+        timestamp: '2026-04-12T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-12T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/current-unlinked',
+          source: 'vscode',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-12T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'first current fragment' },
+      },
+    ]);
+    const continuationPath = writeSession(
+      `2026/04/12/rollout-current-${sessionId}_${continuationId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-12T00:02:00.000Z',
+          ordinal: 0,
+          type: 'session_meta',
+          payload: {
+            id: sessionId,
+            timestamp: '2026-04-12T00:02:00.000Z',
+            cwd: '/Users/test/Desktop/current-unlinked',
+            source: 'vscode',
+            history_mode: 'paginated',
+          },
+        },
+        {
+          timestamp: '2026-04-12T00:03:00.000Z',
+          ordinal: 1,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'second current fragment' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const session = sessions.find(candidate => (
+        candidate.sessionId === sessionId && candidate.filePath === continuationPath
+      ));
+      loadSessionDetail(session);
+      assert.deepEqual(session.userMessages, ['second current fragment']);
+      assert.equal(session.firstTs, '2026-04-12T00:02:00.000Z');
+      assert.equal(session.lastTs, '2026-04-12T00:03:00.000Z');
+
+      const firstFragment = sessions.find(candidate => candidate.filePath === firstPath);
+      firstFragment._rolloutFileLastTs = '2026-04-13T00:00:00.000Z';
+      refreshAttachedRolloutBounds(firstFragment);
+      assert.equal(session.firstTs, '2026-04-12T00:02:00.000Z');
+      assert.equal(session.lastTs, '2026-04-12T00:03:00.000Z');
+    } finally {
+      fs.unlinkSync(firstPath);
+      fs.unlinkSync(continuationPath);
+    }
+  });
+
+  it.skip('fork ancestry without physical history links', () => {
+    const rootPath = writeSession('2026/04/14/rollout-2026-04-14T08-00-00-fork-root.jsonl', [
+      {
+        timestamp: '2026-04-14T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: 'fork-history-root',
+          timestamp: '2026-04-14T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/fork-history',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-14T00:08:00.000Z',
+        ordinal: 8,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'early root request' },
+      },
+      {
+        timestamp: '2026-04-14T00:09:00.000Z',
+        ordinal: 9,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'root_tool', arguments: '{}' },
+      },
+      {
+        timestamp: '2026-04-14T00:10:00.000Z',
+        ordinal: 10,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'root request' },
+      },
+      {
+        timestamp: '2026-04-14T00:11:00.000Z',
+        ordinal: 11,
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'root response' },
+      },
+      {
+        timestamp: '2026-04-14T00:30:00.000Z',
+        ordinal: 12,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'root request after parent fork' },
+      },
+    ]);
+    const rootResumePath = writeSession(
+      '2026/04/14/rollout-2026-04-14T11-00-00-fork-root-resume.jsonl',
+      [
+        {
+          timestamp: '2026-04-14T03:00:00.000Z',
+          ordinal: 10,
+          type: 'session_meta',
+          payload: {
+            id: 'fork-history-root',
+            timestamp: '2026-04-14T03:00:00.000Z',
+            cwd: '/Users/test/Desktop/fork-history',
+            source: 'vscode',
+          },
+        },
+        {
+          timestamp: '2026-04-14T00:10:00.000Z',
+          ordinal: 10,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'root request' },
+        },
+        {
+          timestamp: '2026-04-14T00:11:00.000Z',
+          ordinal: 11,
+          type: 'event_msg',
+          payload: { type: 'agent_message', message: 'root response' },
+        },
+        {
+          timestamp: '2026-04-14T03:01:00.000Z',
+          ordinal: 20,
+          type: 'event_msg',
+          payload: { type: 'agent_message', message: 'root response after all forks' },
+        },
+      ],
+    );
+    const parentPath = writeSession('2026/04/14/rollout-2026-04-14T09-00-00-fork-parent.jsonl', [
+      {
+        timestamp: '2026-04-14T01:00:00.000Z',
+        ordinal: 12,
+        type: 'session_meta',
+        payload: {
+          id: 'fork-history-parent',
+          forked_from_id: 'fork-history-root',
+          forked_from_ordinal_exclusive: 12,
+          timestamp: '2026-04-14T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/fork-history',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-14T01:09:00.000Z',
+        ordinal: 13,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'parent_tool', arguments: '{}' },
+      },
+      {
+        timestamp: '2026-04-14T01:10:00.000Z',
+        ordinal: 14,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'parent request' },
+      },
+      {
+        timestamp: '2026-04-14T01:11:00.000Z',
+        ordinal: 15,
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'parent response' },
+      },
+      {
+        timestamp: '2026-04-14T01:30:00.000Z',
+        ordinal: 16,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'parent request after child fork' },
+      },
+    ]);
+    const childPath = writeSession('2026/04/14/rollout-2026-04-14T10-00-00-fork-child.jsonl', [
+      {
+        timestamp: '2026-04-14T02:00:00.000Z',
+        ordinal: 16,
+        type: 'session_meta',
+        payload: {
+          id: 'fork-history-child',
+          forked_from_id: 'fork-history-parent',
+          forked_from_ordinal_exclusive: 16,
+          timestamp: '2026-04-14T02:00:00.000Z',
+          cwd: '/Users/test/Desktop/fork-history',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-14T02:09:00.000Z',
+        ordinal: 17,
+        type: 'response_item',
+        payload: { type: 'function_call', name: 'child_tool', arguments: '{}' },
+      },
+      {
+        timestamp: '2026-04-14T02:10:00.000Z',
+        ordinal: 18,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'child request' },
+      },
+      {
+        timestamp: '2026-04-14T02:11:00.000Z',
+        ordinal: 19,
+        type: 'event_msg',
+        payload: { type: 'agent_message', message: 'child response' },
+      },
+    ]);
+    const childResumePath = writeSession(
+      '2026/04/14/rollout-2026-04-14T11-30-00-fork-child-resume.jsonl',
+      [
+        {
+          timestamp: '2026-04-14T03:30:00.000Z',
+          ordinal: 20,
+          type: 'session_meta',
+          payload: {
+            id: 'fork-history-child',
+            forked_from_id: 'fork-history-parent',
+            timestamp: '2026-04-14T03:30:00.000Z',
+            cwd: '/Users/test/Desktop/fork-history',
+            source: 'vscode',
+          },
+        },
+        {
+          timestamp: '2026-04-14T03:31:00.000Z',
+          ordinal: 21,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'child continuation' },
+        },
+      ],
+    );
+    const editedChildPath = writeSession(
+      '2026/04/14/rollout-2026-04-14T12-00-00-fork-edited-child.jsonl',
+      [
+        {
+          timestamp: '2026-04-14T04:00:00.000Z',
+          ordinal: 10,
+          type: 'session_meta',
+          payload: {
+            id: 'fork-history-edited-child',
+            forked_from_id: 'fork-history-parent',
+            forked_from_ordinal_exclusive: 10,
+            timestamp: '2026-04-14T04:00:00.000Z',
+            cwd: '/Users/test/Desktop/fork-history',
+            source: 'vscode',
+          },
+        },
+        {
+          timestamp: '2026-04-14T04:01:00.000Z',
+          ordinal: 11,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'edited child request' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === 'fork-history-child');
+      assert.ok(child);
+      assert.deepEqual(
+        child._inheritedRolloutGroups.map(group => ({
+          sessionId: group.sessionId,
+          beforeOrdinal: group.beforeOrdinal,
+          beforeTimestamp: group.beforeTimestamp,
+        })),
+        [
+          {
+            sessionId: 'fork-history-root',
+            beforeOrdinal: 12,
+            beforeTimestamp: '2026-04-14T01:00:00.000Z',
+          },
+          {
+            sessionId: 'fork-history-parent',
+            beforeOrdinal: 16,
+            beforeTimestamp: '2026-04-14T02:00:00.000Z',
+          },
+        ],
+      );
+
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'early root request',
+        'root request',
+        'parent request',
+        'child request',
+        'child continuation',
+      ]);
+      assert.deepEqual(child.assistantSnippets, [
+        'root response',
+        'parent response',
+        'child response',
+      ]);
+      assert.equal(child.totalMessages, 8);
+      assert.equal(child.topic, 'child request', 'the first fork-local prompt wins over continuation');
+      assert.deepEqual(child.toolsUsed, ['root_tool', 'parent_tool', 'child_tool']);
+      assert.equal(child.firstTs, '2026-04-14T02:00:00.000Z');
+
+      const editedChild = sessions.find(session => (
+        session.sessionId === 'fork-history-edited-child'
+      ));
+      assert.deepEqual(
+        editedChild._inheritedRolloutGroups.map(group => group.beforeOrdinal),
+        [10, 10],
+        'an earlier descendant edit caps every ancestor edge',
+      );
+      loadSessionDetail(editedChild);
+      assert.deepEqual(editedChild.userMessages, [
+        'early root request',
+        'edited child request',
+      ]);
+      assert.deepEqual(editedChild.toolsUsed, ['root_tool']);
+
+      const sessionsWithoutOriginalChild = sessions.filter(session => (
+        session.filePath !== childPath
+      ));
+      attachSessionRolloutFiles(sessionsWithoutOriginalChild);
+      assert.equal(child._inheritedRolloutGroups.at(-1).beforeOrdinal, 16,
+        'the fork ordinal survives deletion of the original physical rollout');
+      child._detailLoaded = false;
+      loadSessionDetail(child);
+      assert.ok(!child.userMessages.includes('parent request after child fork'));
+
+      const sessionsWithoutParent = sessionsWithoutOriginalChild.filter(session => (
+        session.sessionId !== 'fork-history-parent'
+      ));
+      attachSessionRolloutFiles(sessionsWithoutParent);
+      assert.equal(child._detailLoaded, false);
+      assert.deepEqual(child._inheritedRolloutGroups, []);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, ['child continuation']);
+      assert.deepEqual(child.assistantSnippets, []);
+    } finally {
+      fs.unlinkSync(rootPath);
+      fs.unlinkSync(rootResumePath);
+      fs.unlinkSync(parentPath);
+      fs.unlinkSync(childPath);
+      fs.unlinkSync(childResumePath);
+      fs.unlinkSync(editedChildPath);
+    }
+  });
+
+  it('reads current fork rollouts with embedded ancestor history', () => {
+    const parentPath = writeSession('2026/04/15/rollout-legacy-parent.jsonl', [
+      {
+        timestamp: '2026-04-15T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-15T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'embedded parent request' },
+      },
+    ]);
+    const childPath = writeSession('2026/04/15/rollout-legacy-child.jsonl', [
+      {
+        timestamp: '2026-04-15T01:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-child',
+          forked_from_id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-15T00:00:00.000Z',
+        ordinal: 1,
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-15T01:00:01.000Z',
+        ordinal: 2,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'embedded parent request' },
+      },
+      {
+        timestamp: '2026-04-15T01:01:00.000Z',
+        ordinal: 3,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'legacy child request' },
+      },
+    ]);
+    const continuationPath = writeSession('2026/04/15/rollout-legacy-child-continuation.jsonl', [
+      {
+        timestamp: '2026-04-15T02:00:00.000Z',
+        type: 'session_meta',
+        payload: {
+          id: 'legacy-fork-child',
+          forked_from_id: 'legacy-fork-parent',
+          timestamp: '2026-04-15T02:00:00.000Z',
+          cwd: '/Users/test/Desktop/legacy-fork',
+          source: 'cli',
+        },
+      },
+      {
+        timestamp: '2026-04-15T02:01:00.000Z',
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'legacy child continuation' },
+      },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const child = sessions.find(session => session.filePath === childPath);
+      assert.equal(child.hasEmbeddedForkHistory, true);
+      assert.equal(child._hasEmbeddedForkHistory, true);
+      assert.deepEqual(child._inheritedRolloutGroups, []);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'embedded parent request',
+        'legacy child request',
+      ]);
+    } finally {
+      fs.unlinkSync(parentPath);
+      fs.unlinkSync(childPath);
+      fs.unlinkSync(continuationPath);
+    }
+  });
+
+  it('follows the physical parent history chain instead of sibling resumes', () => {
+    const parentId = '11111111-1111-7111-8111-111111111111';
+    const chosenThreadId = '22222222-2222-7222-8222-222222222222';
+    const siblingThreadId = '33333333-3333-7333-8333-333333333333';
+    const childId = '44444444-4444-7444-8444-444444444444';
+    const childContinuationThreadId = '55555555-5555-7555-8555-555555555555';
+    const parentPath = writeSession(`2026/04/16/rollout-2026-04-16T08-00-00-${parentId}.jsonl`, [
+      {
+        timestamp: '2026-04-16T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: parentId,
+          timestamp: '2026-04-16T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/physical-fork',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-16T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'physical parent request' },
+      },
+      {
+        timestamp: '2026-04-18T00:02:00.000Z',
+        ordinal: 2,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'abandoned parent suffix' },
+      },
+    ]);
+    const chosenPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T09-00-00-${parentId}_${chosenThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T01:00:00.000Z',
+          ordinal: 2,
+          type: 'session_meta',
+          payload: {
+            id: parentId,
+            timestamp: '2026-04-16T01:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: parentId, end_ordinal_exclusive: 2 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T01:01:00.000Z',
+          ordinal: 3,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'chosen parent continuation' },
+        },
+      ],
+    );
+    const siblingPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T10-00-00-${parentId}_${siblingThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T02:00:00.000Z',
+          ordinal: 2,
+          type: 'session_meta',
+          payload: {
+            id: parentId,
+            timestamp: '2026-04-16T02:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: parentId, end_ordinal_exclusive: 2 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T02:01:00.000Z',
+          ordinal: 3,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'unrelated sibling continuation' },
+        },
+      ],
+    );
+    const childPath = writeSession(`2026/04/16/rollout-2026-04-16T11-00-00-${childId}.jsonl`, [
+      {
+        timestamp: '2026-04-16T03:00:00.000Z',
+        ordinal: 4,
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          forked_from_id: parentId,
+          forked_from_ordinal_exclusive: 4,
+          timestamp: '2026-04-16T03:00:00.000Z',
+          cwd: '/Users/test/Desktop/physical-fork',
+          source: 'vscode',
+          history_base: { thread_id: chosenThreadId, end_ordinal_exclusive: 4 },
+        },
+      },
+      {
+        timestamp: '2026-04-16T03:01:00.000Z',
+        ordinal: 5,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'physical child request' },
+      },
+    ]);
+    const childContinuationPath = writeSession(
+      `2026/04/16/rollout-2026-04-16T12-00-00-${childId}_${childContinuationThreadId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-16T04:00:00.000Z',
+          ordinal: 6,
+          type: 'session_meta',
+          payload: {
+            id: childId,
+            forked_from_id: parentId,
+            timestamp: '2026-04-16T04:00:00.000Z',
+            cwd: '/Users/test/Desktop/physical-fork',
+            source: 'vscode',
+            history_base: { thread_id: childId, end_ordinal_exclusive: 6 },
+          },
+        },
+        {
+          timestamp: '2026-04-16T04:01:00.000Z',
+          ordinal: 7,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'physical child continuation' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === childId);
+      assert.deepEqual(child._inheritedRolloutGroups[0].filePaths, [parentPath, chosenPath]);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'physical parent request',
+        'chosen parent continuation',
+        'physical child request',
+        'physical child continuation',
+      ]);
+      assert.ok(!child.userMessages.includes('unrelated sibling continuation'));
+      assert.ok(!child.userMessages.includes('abandoned parent suffix'));
+      assert.equal(child.lastTs, '2026-04-16T04:01:00.000Z');
+
+      const childContinuation = sessions.find(session => (
+        session.filePath === childContinuationPath
+      ));
+      childContinuation._rolloutFileLastTs = '2026-04-16T05:00:00.000Z';
+      refreshAttachedRolloutBounds(childContinuation);
+      assert.equal(child.lastTs, '2026-04-16T05:00:00.000Z',
+        'fresh indexing on the unbounded terminal rollout advances Last active');
+      child._detailLoaded = false;
+      loadSessionDetail(child);
+      assert.equal(child.lastTs, '2026-04-16T05:00:00.000Z',
+        'detail loading does not regress a fresher terminal rollout timestamp');
+
+      fs.unlinkSync(childPath);
+      const reloadedSessions = loadAllSessions({ threadNames: new Map() });
+      const reloadedChild = reloadedSessions.find(session => session.sessionId === childId);
+      assert.equal(reloadedChild.forkedFromOrdinalExclusive, 4);
+      assert.equal(reloadedChild.parentHistoryThreadId, chosenThreadId);
+      loadSessionDetail(reloadedChild);
+      assert.deepEqual(reloadedChild.userMessages, [
+        'physical parent request',
+        'chosen parent continuation',
+        'physical child continuation',
+      ]);
+      assert.ok(!reloadedChild.userMessages.includes('unrelated sibling continuation'));
+
+      fs.unlinkSync(chosenPath);
+      const missingParentSessions = loadAllSessions({ threadNames: new Map() });
+      const childWithMissingParent = missingParentSessions.find(session => (
+        session.sessionId === childId
+      ));
+      loadSessionDetail(childWithMissingParent);
+      assert.deepEqual(childWithMissingParent.userMessages, ['physical child continuation']);
+      assert.ok(!childWithMissingParent.userMessages.includes('unrelated sibling continuation'));
+    } finally {
+      fs.unlinkSync(parentPath);
+      if (fs.existsSync(chosenPath)) fs.unlinkSync(chosenPath);
+      fs.unlinkSync(siblingPath);
+      if (fs.existsSync(childPath)) fs.unlinkSync(childPath);
+      fs.unlinkSync(childContinuationPath);
+    }
+  });
+
+  it('uses an exact physical base when an intermediate session is missing', () => {
+    const rootId = '66666666-6666-7666-8666-666666666666';
+    const missingParentId = '77777777-7777-7777-8777-777777777777';
+    const childId = '88888888-8888-7888-8888-888888888888';
+    const rootPath = writeSession(`2026/04/17/rollout-2026-04-17T08-00-00-${rootId}.jsonl`, [
+      {
+        timestamp: '2026-04-17T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: rootId,
+          timestamp: '2026-04-17T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/missing-intermediate',
+          source: 'vscode',
+        },
+      },
+      {
+        timestamp: '2026-04-17T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'surviving grandparent request' },
+      },
+    ]);
+    const childPath = writeSession(`2026/04/17/rollout-2026-04-17T09-00-00-${childId}.jsonl`, [
+      {
+        timestamp: '2026-04-17T01:00:00.000Z',
+        ordinal: 2,
+        type: 'session_meta',
+        payload: {
+          id: childId,
+          forked_from_id: missingParentId,
+          forked_from_ordinal_exclusive: 2,
+          timestamp: '2026-04-17T01:00:00.000Z',
+          cwd: '/Users/test/Desktop/missing-intermediate',
+          source: 'vscode',
+          history_base: { thread_id: rootId, end_ordinal_exclusive: 2 },
+        },
+      },
+      {
+        timestamp: '2026-04-17T01:01:00.000Z',
+        ordinal: 3,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'child after missing intermediate' },
+      },
+    ]);
+
+    try {
+      const sessions = loadAllSessions({ useCache: false, threadNames: new Map() });
+      const child = sessions.find(session => session.sessionId === childId);
+      loadSessionDetail(child);
+      assert.deepEqual(child.userMessages, [
+        'surviving grandparent request',
+        'child after missing intermediate',
+      ]);
+    } finally {
+      fs.unlinkSync(rootPath);
+      fs.unlinkSync(childPath);
+    }
+  });
+
+  it('keeps hidden empty rollouts as physical graph connectors', () => {
+    const sessionId = 'bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb';
+    const connectorId = 'cccccccc-cccc-7ccc-8ccc-cccccccccccc';
+    const latestId = 'dddddddd-dddd-7ddd-8ddd-dddddddddddd';
+    const rootPath = writeSession(`2026/04/18/rollout-graph-${sessionId}.jsonl`, [
+      {
+        timestamp: '2026-04-18T00:00:00.000Z',
+        ordinal: 0,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-18T00:00:00.000Z',
+          cwd: '/Users/test/Desktop/graph-connectors',
+          source: 'vscode',
+          history_mode: 'paginated',
+        },
+      },
+      {
+        timestamp: '2026-04-18T00:01:00.000Z',
+        ordinal: 1,
+        type: 'event_msg',
+        payload: { type: 'user_message', message: 'before empty connector' },
+      },
+    ]);
+    const connectorPath = writeSession(
+      `2026/04/18/rollout-graph-${sessionId}_${connectorId}.jsonl`,
+      [{
+        timestamp: '2026-04-18T00:02:00.000Z',
+        ordinal: 2,
+        type: 'session_meta',
+        payload: {
+          id: sessionId,
+          timestamp: '2026-04-18T00:02:00.000Z',
+          cwd: '/Users/test/Desktop/graph-connectors',
+          source: 'vscode',
+          history_mode: 'paginated',
+          history_base: { thread_id: sessionId, end_ordinal_exclusive: 2 },
+        },
+      }],
+    );
+    const latestPath = writeSession(
+      `2026/04/18/rollout-graph-${sessionId}_${latestId}.jsonl`,
+      [
+        {
+          timestamp: '2026-04-18T00:03:00.000Z',
+          ordinal: 3,
+          type: 'session_meta',
+          payload: {
+            id: sessionId,
+            timestamp: '2026-04-18T00:03:00.000Z',
+            cwd: '/Users/test/Desktop/graph-connectors',
+            source: 'vscode',
+            history_mode: 'paginated',
+            history_base: { thread_id: connectorId, end_ordinal_exclusive: 3 },
+          },
+        },
+        {
+          timestamp: '2026-04-18T00:04:00.000Z',
+          ordinal: 4,
+          type: 'event_msg',
+          payload: { type: 'user_message', message: 'after empty connector' },
+        },
+      ],
+    );
+
+    try {
+      const sessions = loadAllSessions({ threadNames: new Map() });
+      const connector = sessions.find(session => session.filePath === connectorPath);
+      connector._excludeFromList = true;
+      updateSessionCacheRecord(sessions, connector);
+      sessions.splice(sessions.indexOf(connector), 1);
+      attachSessionRolloutFiles(sessions);
+      flushSessionCache(sessions);
+
+      const latest = sessions.find(session => session.filePath === latestPath);
+      loadSessionDetail(latest);
+      assert.deepEqual(latest.userMessages, [
+        'before empty connector',
+        'after empty connector',
+      ]);
+
+      const originalOpenSync = fs.openSync;
+      let connectorOpens = 0;
+      fs.openSync = function(target, ...args) {
+        if (target === connectorPath) connectorOpens++;
+        return originalOpenSync.call(this, target, ...args);
+      };
+      let reloaded;
+      try {
+        reloaded = loadAllSessions({ threadNames: new Map() });
+      } finally {
+        fs.openSync = originalOpenSync;
+      }
+      assert.equal(connectorOpens, 0,
+        'a hidden cached connector is restored without reparsing its rollout');
+      assert.ok(!reloaded.some(session => session.filePath === connectorPath));
+      const reloadedLatest = reloaded.find(session => session.filePath === latestPath);
+      loadSessionDetail(reloadedLatest);
+      assert.deepEqual(reloadedLatest.userMessages, [
+        'before empty connector',
+        'after empty connector',
+      ]);
+    } finally {
+      fs.unlinkSync(rootPath);
+      fs.unlinkSync(connectorPath);
+      fs.unlinkSync(latestPath);
     }
   });
 
@@ -793,6 +1592,10 @@ describe('session parsing', () => {
         payload: {
           id: 'fork-child',
           forked_from_id: 'fork-parent',
+          history_base: {
+            thread_id: 'fork-parent',
+            end_ordinal_exclusive: 42,
+          },
           timestamp: '2026-04-13T04:00:00.000Z',
           cwd: '/Users/test/Desktop/fork-child',
           source: 'cli',
@@ -820,6 +1623,8 @@ describe('session parsing', () => {
     const session = loadSessionQuick(filePath);
     assert.equal(session.sessionId, 'fork-child');
     assert.equal(session.forkedFromId, 'fork-parent');
+    assert.equal(session.forkedFromOrdinalExclusive, 42);
+    assert.equal(session.hasEmbeddedForkHistory, true);
     assert.deepEqual(session.ancestorIds, ['fork-parent']);
 
     loadSessionDetail(session);
@@ -1343,7 +2148,7 @@ describe('session parsing', () => {
     fs.writeFileSync(CACHE_FILE, '{broken cache');
     assert.doesNotThrow(() => loadAllSessions());
     const rebuilt = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
-    assert.equal(rebuilt.version, 1);
+    assert.equal(rebuilt.version, 4);
     assert.equal(rebuilt.files[filePath], undefined);
   });
 });
